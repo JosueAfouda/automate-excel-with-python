@@ -22,6 +22,9 @@ def get_analytics_paths() -> dict[str, Path]:
     """Return the analytics CSV paths used by the dashboard."""
     analytics_dir = get_project_root() / "outputs" / "analytics"
     return {
+        "overview": analytics_dir / "kpi_overview.csv",
+        "monthly": analytics_dir / "monthly_kpis.csv",
+        "by_store": analytics_dir / "kpis_by_store.csv",
         "by_plan": analytics_dir / "kpis_by_plan.csv",
         "quality": analytics_dir / "analytics_quality.csv",
         "file_inventory": analytics_dir / "analytics_file_inventory.csv",
@@ -40,6 +43,17 @@ def get_reporting_paths() -> dict[str, Path]:
 def get_reporting_signatures(paths: dict[str, Path]) -> tuple[int, ...]:
     """Return file signatures used to invalidate Streamlit cache on data refresh."""
     return tuple(path.stat().st_mtime_ns for path in paths.values())
+
+
+def get_latest_analytics_update() -> str:
+    """Return the latest modification timestamp across analytics output files."""
+    analytics_paths = get_analytics_paths()
+    existing_paths = [path for path in analytics_paths.values() if path.exists()]
+    if not existing_paths:
+        return "n/a"
+
+    latest_timestamp = max(path.stat().st_mtime for path in existing_paths)
+    return pd.Timestamp.fromtimestamp(latest_timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def format_currency(value: float) -> str:
@@ -291,6 +305,9 @@ def main() -> None:
     with st.sidebar:
         st.header("Parametres")
         top_n = st.slider("Top N pour les classements", min_value=3, max_value=10, value=6)
+        if st.button("Rafraichir les donnees", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
 
     reporting_paths = get_reporting_paths()
 
@@ -352,7 +369,9 @@ def main() -> None:
     overview_map = build_overview_map(overview_df)
     period_start = overview_map.get("period_start", "n/a")
     period_end = overview_map.get("period_end", "n/a")
+    latest_update = get_latest_analytics_update()
     st.markdown(f"**Periode couverte :** {period_start} a {period_end}")
+    st.caption(f"Derniere mise a jour : {latest_update}")
     render_filter_summary(filtered_df)
 
     render_overview_metrics(overview_map, monthly_df, file_inventory_df)
