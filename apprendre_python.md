@@ -1448,3 +1448,311 @@ Dans ton projet :
 - l'etat de transformation est deduit a partir de `clean_sales_data.csv`
 
 Cela te donne deja une petite architecture de pipeline tres proche de vraies pratiques de production.
+
+## 16. Phase analytics : calcul des KPIs en incremental
+
+Le pipeline contient maintenant une phase analytics apres la transformation.
+
+Son objectif est de :
+
+- partir des donnees nettoyees
+- calculer des indicateurs metier utiles
+- sauvegarder plusieurs sorties CSV dans `outputs/analytics/`
+- n'executer le calcul des KPIs que lorsque des fichiers restent a analyser
+
+### Les sorties analytics maintenant generees
+
+Le pipeline ecrit desormais les fichiers suivants dans `outputs/analytics/` :
+
+- `kpi_overview.csv`
+- `monthly_kpis.csv`
+- `kpis_by_store.csv`
+- `kpis_by_plan.csv`
+- `analytics_quality.csv`
+- `analytics_file_inventory.csv`
+
+### Le role de `src/analytic/kpis.py`
+
+Ce module contient la logique metier de calcul des indicateurs.
+
+Comme pour les autres etapes, son role n'est pas :
+
+- de lire les fichiers Excel
+- de decider quels fichiers sont nouveaux
+- de gerer directement l'orchestration du pipeline
+
+Son role est :
+
+- de prendre un lot de donnees nettoyees
+- de normaliser les types utiles au calcul
+- de produire un ensemble de sorties KPI
+
+### Ce que j'ai corrige et ameliore dans `kpis.py`
+
+#### 1. Validation des colonnes attendues
+
+J'ai ajoute une verification des colonnes necessaires au calcul des KPIs.
+
+Pourquoi ?
+
+Parce que les KPIs reposent sur des colonnes obligatoires comme :
+
+- `transaction_id`
+- `transaction_date`
+- `amount`
+- `store`
+- `plan`
+- `month_start`
+- `year_month`
+
+Si l'une d'elles manque, il vaut mieux lever une erreur claire plutot que produire des resultats faux ou incomplets.
+
+#### 2. Normalisation robuste des types
+
+Les donnees KPI sont relues depuis `clean_sales_data.csv`.
+
+Donc, meme si elles etaient propres a l'etape de transformation, certaines colonnes reviennent depuis CSV sous forme de chaines, notamment :
+
+- `transaction_date`
+- `month_start`
+
+J'ai donc ajoute une normalisation explicite avant les agregations :
+
+- conversion des dates avec `pd.to_datetime(..., format="mixed")`
+- conversion de `amount` en numerique
+- nettoyage de certaines colonnes texte
+
+Cela evite les erreurs silencieuses dans les calculs.
+
+#### 3. Ajout de logs pour la phase KPI
+
+Le module analytics journalise maintenant :
+
+- le debut du calcul des KPIs
+- la taille du lot traite
+- le nombre de lignes produites pour les sorties mensuelles, magasins et plans
+
+Ces logs s'ajoutent a ceux du pipeline, qui journalise aussi :
+
+- combien de fichiers restent a analyser
+- quand les sorties KPI sont ecrites
+- quand l'etape analytics est sautee
+
+### Les KPIs calcules et leur signification business
+
+#### `kpi_overview.csv`
+
+Ce fichier contient une vue de synthese globale sur toute la periode analysee.
+
+Les indicateurs calcules sont :
+
+- `period_start`
+  premiere date de transaction presente dans les donnees analysees
+- `period_end`
+  derniere date de transaction presente dans les donnees analysees
+- `total_revenue`
+  chiffre d'affaires total sur la periode
+- `total_transactions`
+  nombre total de transactions uniques
+- `average_ticket`
+  panier moyen, c'est-a-dire le chiffre d'affaires moyen par transaction
+- `new_revenue`
+  chiffre d'affaires genere par les nouveaux contrats
+- `existing_revenue`
+  chiffre d'affaires genere par les contrats existants
+- `new_revenue_share`
+  part du chiffre d'affaires venant des nouveaux contrats
+- `stores_count`
+  nombre de magasins distincts actifs dans les donnees
+
+Fonctionnellement, ce fichier sert a repondre rapidement a des questions comme :
+
+- combien avons-nous vendu au total ?
+- quelle est la taille moyenne d'une transaction ?
+- la croissance vient-elle plutot de nouveaux clients ou du portefeuille existant ?
+
+#### `monthly_kpis.csv`
+
+Ce fichier donne une vue mensuelle de la performance.
+
+Les indicateurs calcules sont :
+
+- `revenue_existing`
+  chiffre d'affaires mensuel provenant des contrats existants
+- `revenue_new`
+  chiffre d'affaires mensuel provenant des nouveaux contrats
+- `revenue_total`
+  chiffre d'affaires total du mois
+- `transactions`
+  nombre de transactions du mois
+- `average_ticket`
+  panier moyen du mois
+- `growth_mom`
+  croissance month-over-month, c'est-a-dire l'evolution du chiffre d'affaires par rapport au mois precedent
+
+Fonctionnellement, ce fichier permet de voir :
+
+- si le business progresse ou recule d'un mois a l'autre
+- si certaines periodes sont plus fortes que d'autres
+- si les ventes evoluent par volume ou par panier moyen
+
+#### `kpis_by_store.csv`
+
+Ce fichier agrege les KPIs par magasin.
+
+Les indicateurs calcules sont :
+
+- `revenue`
+  chiffre d'affaires du magasin
+- `transactions`
+  nombre de transactions du magasin
+- `average_ticket`
+  panier moyen du magasin
+- `revenue_share`
+  part du chiffre d'affaires global generee par ce magasin
+
+Fonctionnellement, cela permet de comparer les performances des magasins et d'identifier :
+
+- les points de vente les plus contributeurs
+- les magasins qui vendent beaucoup mais avec un faible panier moyen
+- ceux qui ont un poids important dans le chiffre d'affaires total
+
+#### `kpis_by_plan.csv`
+
+Ce fichier agrege les KPIs par plan commercial (`Bronze`, `Silver`, `Gold`).
+
+Les indicateurs calcules sont :
+
+- `revenue`
+  chiffre d'affaires genere par le plan
+- `transactions`
+  nombre de transactions du plan
+- `average_ticket`
+  panier moyen du plan
+- `revenue_share`
+  part du chiffre d'affaires global representee par ce plan
+
+Fonctionnellement, cela permet de comprendre :
+
+- quels plans contribuent le plus au revenu
+- quels plans sont les plus vendus
+- quels plans tirent le mieux le panier moyen vers le haut
+
+#### `analytics_quality.csv`
+
+Ce fichier conserve un petit rapport qualite par execution analytics.
+
+Il contient par exemple :
+
+- le nombre de lignes nettoyees recues en entree
+- le nombre de fichiers traites dans le batch
+- le nombre de mois couverts
+- le nombre de lignes generees dans les differentes sorties KPI
+- la periode couverte
+- un `run_timestamp`
+
+Fonctionnellement, il aide a auditer les runs analytics.
+
+#### `analytics_file_inventory.csv`
+
+Ce fichier est la memoire incremental de l'etape KPI.
+
+Il enregistre pour chaque fichier source :
+
+- son nom
+- son dossier
+- le nombre de lignes analysees
+- la periode couverte
+- le statut
+
+Ce fichier permet au pipeline de savoir quels fichiers ont deja ete pris en compte dans les KPIs.
+
+### Comment l'incremental KPI fonctionne
+
+Le pipeline ne recalcule pas les KPIs a chaque execution.
+
+Il compare :
+
+- les fichiers deja presents dans `clean_sales_data.csv`
+- les fichiers deja presents dans `analytics_file_inventory.csv`
+
+Puis il calcule :
+
+- fichiers nettoyes
+- moins
+- fichiers deja analyses
+
+Le resultat correspond aux fichiers restant a analyser.
+
+### Le comportement final de l'etape analytics
+
+#### Cas 1 : aucun fichier en attente d'analyse
+
+Dans ce cas :
+
+- l'etape analytics est sautee
+- aucun fichier KPI n'est reecrit
+
+Cela evite tout recalcul inutile.
+
+#### Cas 2 : un ou plusieurs fichiers sont en attente
+
+Dans ce cas :
+
+- seules les lignes nettoyees de ces fichiers sont prises en compte dans le batch analytics
+- les sorties KPI existantes sont mises a jour incrementalement
+- l'inventaire analytics est enrichi
+
+### Comment les KPI sont mis a jour incrementalement
+
+Le principe n'est pas de recalculer tous les KPIs depuis zero.
+
+Le pipeline fait plutot ceci :
+
+- il calcule un lot KPI sur les nouvelles lignes nettoyees
+- il fusionne ce lot avec les sorties KPI deja existantes
+- il recalcule seulement les colonnes derivees necessaires
+
+Exemples :
+
+- les revenus mensuels sont ajoutes au bon mois
+- les KPIs par magasin sont mis a jour en additionnant les nouveaux revenus et transactions
+- les KPIs par plan sont mis a jour de la meme maniere
+- les parts de revenu et paniers moyens sont recalcules a partir des agregats mis a jour
+
+### Un point subtil sur l'incremental analytics
+
+Pour certains indicateurs, une vraie mise a jour incremental est assez naturelle :
+
+- revenus
+- volumes
+- transactions
+
+Pour d'autres, il faut recalculer une valeur derivee a partir des totaux mis a jour, par exemple :
+
+- `average_ticket`
+- `revenue_share`
+- `growth_mom`
+
+Cela reste incremental, car on ne repart pas des transactions brutes historiques.
+
+On repart des tables KPI deja agregees, puis on met a jour les colonnes derivees.
+
+### Ce que cette phase t'apprend
+
+Avec cette etape KPI, tu vois maintenant trois niveaux differents d'incremental dans un meme projet :
+
+- ingestion incremental par fichier brut
+- transformation incrementale par fichier nettoye restant a traiter
+- analytics incremental par fichier deja transforme mais pas encore analyse
+
+Cela te rapproche beaucoup d'une vraie architecture de pipeline data.
+
+### Ce que tu pourras faire ensuite
+
+La suite logique pourrait etre :
+
+- ajouter des tests sur les calculs KPI
+- produire des dashboards ou exports Excel a partir des CSV analytics
+- ajouter des KPI supplementaires
+  par exemple : taux de retention, repartition geographique, KPI par type de contrat, top evolutions mensuelles
