@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from .logging_config import configure_logging
+from .transformation.cleaning import CleaningResult, clean_sales_data
 
 from .ingestion.sales_ingestion import (
     IngestionResult,
@@ -22,6 +23,7 @@ class PipelineRunResult:
     new_files_processed: int
     skipped_files: int
     rows_ingested: int
+    rows_cleaned: int
 
 
 def get_project_root() -> Path:
@@ -34,6 +36,13 @@ def get_output_paths(output_dir: Path) -> dict[str, Path]:
     return {
         "business_data": output_dir / "business_data.csv",
         "ingestion_metadata": output_dir / "ingestion_metadata.csv",
+    }
+
+
+def get_transformation_output_paths(output_dir: Path) -> dict[str, Path]:
+    """Return the CSV output paths for the transformation step."""
+    return {
+        "clean_sales_data": output_dir / "clean_sales_data.csv",
     }
 
 
@@ -175,17 +184,32 @@ def save_ingestion_outputs(
     return output_paths
 
 
+def save_transformation_outputs(
+    cleaning_result: CleaningResult,
+    output_dir: Path,
+) -> dict[str, Path]:
+    """Save transformation outputs to CSV files and return their paths."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_paths = get_transformation_output_paths(output_dir)
+
+    logger.info("Writing clean sales data to %s", output_paths["clean_sales_data"])
+    cleaning_result.data.to_csv(output_paths["clean_sales_data"], index=False)
+
+    return output_paths
+
+
 def run_pipeline(
     output_dir: Path | None = None,
     source_dir: Path | None = None,
 ) -> PipelineRunResult:
     """Run the current pipeline and return the generated file paths."""
     log_file = configure_logging()
-    target_output_dir = output_dir or get_project_root() / "outputs" / "ingestion"
-    output_paths = get_output_paths(target_output_dir)
+    ingestion_output_dir = output_dir or get_project_root() / "outputs" / "ingestion"
+    transformation_output_dir = get_project_root() / "outputs" / "transformation"
+    ingestion_output_paths = get_output_paths(ingestion_output_dir)
     logger.info("File logging configured at %s", log_file)
-    logger.info("Starting pipeline run with output directory %s", target_output_dir)
-    validate_incremental_outputs(output_paths)
+    logger.info("Starting pipeline run with ingestion output directory %s", ingestion_output_dir)
+    validate_incremental_outputs(ingestion_output_paths)
 
     available_files = discover_excel_files(source_dir)
     if not available_files:
@@ -195,7 +219,7 @@ def run_pipeline(
         )
 
     logger.info("Discovered %s sales file(s)", len(available_files))
-    existing_metadata = read_ingestion_metadata(output_paths["ingestion_metadata"])
+    existing_metadata = read_ingestion_metadata(ingestion_output_paths["ingestion_metadata"])
     loaded_file_keys = get_loaded_file_keys(existing_metadata)
     new_files = filter_new_files(available_files, loaded_file_keys)
     skipped_files = len(available_files) - len(new_files)
@@ -208,30 +232,46 @@ def run_pipeline(
 
     if not new_files:
         logger.info("No new files to ingest. Pipeline outputs remain unchanged.")
-        return PipelineRunResult(
-            output_paths=output_paths,
-            new_files_processed=0,
-            skipped_files=skipped_files,
-            rows_ingested=0,
+        current_business_data = read_business_data(ingestion_output_paths["business_data"])
+        ingestion_output_paths_result = ingestion_output_paths
+        rows_ingested = 0
+    else:
+        ingestion_result = load_sales_files(new_files)
+        merged_result = IngestionResult(
+            data=merge_business_data(ingestion_output_paths["business_data"], ingestion_result.data),
+            file_inventory=merge_ingestion_metadata(
+                existing_metadata,
+                ingestion_result.file_inventory,
+            ),
+        )
+        ingestion_output_paths_result = save_ingestion_outputs(merged_result, ingestion_output_dir)
+        current_business_data = merged_result.data
+        rows_ingested = len(ingestion_result.data)
+        logger.info(
+            "Ingestion stage completed: %s new file(s) processed, %s row(s) ingested",
+            len(new_files),
+            rows_ingested,
         )
 
-    ingestion_result = load_sales_files(new_files)
-    merged_result = IngestionResult(
-        data=merge_business_data(output_paths["business_data"], ingestion_result.data),
-        file_inventory=merge_ingestion_metadata(
-            existing_metadata,
-            ingestion_result.file_inventory,
-        ),
+    logger.info("Starting transformation stage on %s row(s)", len(current_business_data))
+    cleaning_result = clean_sales_data(current_business_data)
+    transformation_output_paths = save_transformation_outputs(
+        cleaning_result,
+        transformation_output_dir,
     )
-    saved_output_paths = save_ingestion_outputs(merged_result, target_output_dir)
     logger.info(
-        "Pipeline run completed: %s new file(s) processed, %s row(s) ingested",
-        len(new_files),
-        len(ingestion_result.data),
+        "Transformation stage completed: %s cleaned row(s) written",
+        len(cleaning_result.data),
     )
+    combined_output_paths = {
+        **ingestion_output_paths_result,
+        **transformation_output_paths,
+    }
+    logger.info("Pipeline run completed successfully")
     return PipelineRunResult(
-        output_paths=saved_output_paths,
+        output_paths=combined_output_paths,
         new_files_processed=len(new_files),
         skipped_files=skipped_files,
-        rows_ingested=len(ingestion_result.data),
+        rows_ingested=rows_ingested,
+        rows_cleaned=len(cleaning_result.data),
     )

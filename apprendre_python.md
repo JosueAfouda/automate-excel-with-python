@@ -973,3 +973,209 @@ Avec une vraie configuration :
 - tu peux auditer une execution
 - tu peux deboguer plus facilement
 - tu peux superviser ton pipeline dans le temps
+
+## 13. Phase de transformation des donnees
+
+Le pipeline contient maintenant une vraie phase de transformation apres l'ingestion.
+
+L'objectif de cette etape est simple :
+
+- partir des donnees brutes ingerees
+- les nettoyer
+- les standardiser
+- produire un fichier exploitable pour les etapes suivantes
+
+Le fichier genere est :
+
+- `outputs/transformation/clean_sales_data.csv`
+
+### Le role de `src/transformation/cleaning.py`
+
+Ce module contient la logique metier de nettoyage.
+
+Son role n'est pas :
+
+- de decider quels fichiers Excel lire
+- d'ecrire les sorties du pipeline
+
+Son role est uniquement :
+
+- de prendre un `DataFrame` d'entree
+- d'appliquer les regles de nettoyage
+- de renvoyer un `DataFrame` nettoye et un petit rapport qualite
+
+Cette separation est importante :
+
+- `ingestion` lit les donnees
+- `transformation` nettoie les donnees
+- `pipeline` orchestre les etapes
+
+### Ce que j'ai verifie et ameliore dans `cleaning.py`
+
+La logique que tu avais ecrite etait deja saine. Je l'ai surtout fiabilisee et rendue plus explicite.
+
+#### 1. Validation des colonnes attendues
+
+J'ai ajoute une verification des colonnes obligatoires avant le nettoyage.
+
+Pourquoi ?
+
+Si un `DataFrame` arrive sans colonne essentielle comme :
+
+- `transaction_id`
+- `transaction_date`
+- `amount`
+
+alors il vaut mieux lever une erreur claire tout de suite plutot que laisser le code echouer plus loin de maniere moins lisible.
+
+#### 2. Gestion plus sure des colonnes texte
+
+J'ai remplace plusieurs conversions `astype(str)` par `astype("string")`.
+
+Pourquoi c'est mieux ?
+
+- `astype(str)` transforme les valeurs manquantes en chaine `"nan"`
+- `astype("string")` garde une vraie notion de valeur manquante pandas
+
+Cela rend le nettoyage plus propre et plus previsible.
+
+#### 3. Ajout de logs de transformation
+
+J'ai ajoute des logs a chaque grande etape :
+
+- debut du nettoyage
+- apres filtrage des `transaction_id`
+- apres conversion des types et filtre sur `amount`
+- apres filtre sur `status`
+- apres deduplication
+- fin du nettoyage
+
+Ces logs sont tres utiles pour comprendre rapidement :
+
+- combien de lignes entrent dans la transformation
+- combien sont eliminees par chaque regle
+- combien restent a la fin
+
+### Les regles de nettoyage actuellement appliquees
+
+Le nettoyage effectue aujourd'hui les operations suivantes :
+
+1. suppression des lignes sans `transaction_id` valide
+2. standardisation des colonnes texte
+3. conversion de `transaction_date` en date
+4. conversion de `amount` en numerique
+5. suppression des lignes avec date invalide
+6. suppression des lignes avec montant nul, manquant ou negatif
+7. conservation des seules lignes avec `status = ACTIVE`
+8. suppression des doublons sur `transaction_id`
+9. ajout de `month_start`
+10. ajout de `year_month`
+
+Ces deux nouvelles colonnes sont utiles pour les futures analyses mensuelles.
+
+### Le `quality_report`
+
+La fonction de nettoyage continue de retourner un objet `CleaningResult` avec :
+
+- `data`
+- `quality_report`
+
+Le `quality_report` contient le nombre de lignes a differents stades.
+
+Pour l'instant, le pipeline ne l'ecrit pas dans un fichier dedie, car ton besoin principal etait :
+
+- obtenir `clean_sales_data.csv`
+- disposer de logs clairs
+
+Mais ce rapport pourra plus tard etre sauvegarde si tu veux renforcer le suivi qualite.
+
+### Integration de la transformation dans `src/pipeline.py`
+
+J'ai integre la transformation comme etape suivant l'ingestion.
+
+Le flux est maintenant :
+
+1. ingestion incrementale des nouveaux fichiers Excel
+2. mise a jour de `business_data.csv`
+3. chargement des donnees d'ingestion completes
+4. appel a `clean_sales_data(...)`
+5. sauvegarde de `clean_sales_data.csv`
+
+### Pourquoi la transformation s'execute meme s'il n'y a aucun nouveau fichier
+
+J'ai choisi de faire tourner la transformation meme quand l'ingestion n'a aucun nouveau fichier.
+
+Pourquoi ce choix ?
+
+- cela garantit que `clean_sales_data.csv` existe toujours
+- cela garantit que la sortie de transformation reste reconstruisable a partir de `business_data.csv`
+- cela decouple mieux la transformation de la detection incrementale des fichiers source
+
+Autrement dit :
+
+- l'ingestion est incrementale au niveau des fichiers Excel
+- la transformation reconstruit la vue nettoyee a partir de la sortie d'ingestion actuelle
+
+C'est un choix simple et sain pour ton projet actuel.
+
+Plus tard, tu pourras rendre aussi la transformation incrementale si tu en as besoin.
+
+### La sortie de transformation
+
+Le pipeline ecrit maintenant :
+
+- `outputs/transformation/clean_sales_data.csv`
+
+Dans ton cas actuel, ce fichier contient :
+
+- `22074` lignes nettoyees
+- `11` colonnes
+
+Les colonnes incluent maintenant :
+
+- les colonnes d'origine nettoyees
+- `month_start`
+- `year_month`
+
+### Les logs de transformation
+
+La phase de transformation est maintenant visible dans :
+
+- `outputs/logs/pipeline.log`
+
+Tu peux y voir des messages comme :
+
+- `Starting transformation stage on 32497 row(s)`
+- `Rows after date/amount filters: 22074`
+- `Rows after deduplication: 22074`
+- `Transformation stage completed: 22074 cleaned row(s) written`
+
+Cela rend le pipeline beaucoup plus facile a suivre et a deboguer.
+
+### Ce que cette phase t'apprend
+
+Cette etape montre une idee importante du data engineering :
+
+- les donnees ingerees ne sont pas encore des donnees pretes a analyser
+
+Il faut souvent une phase intermediaire de transformation pour :
+
+- corriger les types
+- filtrer les valeurs invalides
+- harmoniser les formats
+- enrichir les donnees avec des colonnes utiles
+
+Cette separation entre ingestion et transformation est une tres bonne pratique, car elle rend le pipeline :
+
+- plus lisible
+- plus testable
+- plus evolutif
+
+### Ce que tu pourras faire ensuite
+
+La prochaine suite logique, apres cette phase, serait par exemple :
+
+- calculer des KPI a partir de `clean_sales_data.csv`
+- produire des agregations mensuelles
+- sauvegarder un rapport qualite de transformation
+- ajouter des tests unitaires sur `clean_sales_data(...)`
