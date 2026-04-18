@@ -1,7 +1,10 @@
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 REQUIRED_COLUMNS = [
@@ -13,6 +16,10 @@ REQUIRED_COLUMNS = [
     "amount",
 ]
 OPTIONAL_COLUMNS = ["status"]
+INGESTION_DATA_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS + [
+    "source_file",
+    "source_folder",
+]
 
 
 @dataclass
@@ -34,6 +41,7 @@ def discover_excel_files(source_dir: Path | None = None) -> list[Path]:
     target_dir = source_dir or get_project_root() / "raw_sales_data"
 
     if not target_dir.exists():
+        logger.warning("Source directory does not exist: %s", target_dir)
         return []
 
     files = [
@@ -61,20 +69,23 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return normalized[ordered_columns + other_columns]
 
 
-def load_sales_data(source_dir: Path | None = None) -> IngestionResult:
-    """Load, normalize, and combine all sales Excel files."""
-    files = discover_excel_files(source_dir)
+def empty_ingestion_data() -> pd.DataFrame:
+    """Return an empty DataFrame with the ingestion data columns."""
+    return pd.DataFrame(columns=INGESTION_DATA_COLUMNS)
 
+
+def load_sales_files(files: list[Path]) -> IngestionResult:
+    """Load, normalize, and combine the provided sales Excel files."""
     if not files:
-        raise FileNotFoundError(
-            "No sales Excel files were found in the configured source folder."
-        )
+        raise ValueError("No sales Excel files were provided for ingestion.")
 
+    logger.info("Loading %s sales file(s)", len(files))
     parts: list[pd.DataFrame] = []
     inventory_rows: list[dict[str, object]] = []
 
     for file_path in files:
         try:
+            logger.info("Reading sales file %s", file_path)
             raw = pd.read_excel(file_path)
             normalized = normalize_columns(raw)
 
@@ -90,7 +101,9 @@ def load_sales_data(source_dir: Path | None = None) -> IngestionResult:
                     "status": "loaded",
                 }
             )
+            logger.info("Loaded %s row(s) from %s", len(normalized), file_path.name)
         except Exception as error:
+            logger.exception("Failed to load sales file %s", file_path)
             inventory_rows.append(
                 {
                     "source_file": file_path.name,
@@ -101,13 +114,26 @@ def load_sales_data(source_dir: Path | None = None) -> IngestionResult:
                 }
             )
 
-    if not parts:
-        raise ValueError("No valid data could be loaded from the Excel files.")
-
-    combined = pd.concat(parts, ignore_index=True)
+    combined = (
+        pd.concat(parts, ignore_index=True)
+        if parts
+        else empty_ingestion_data()
+    )
 
     inventory = pd.DataFrame(inventory_rows).sort_values(
         ["source_folder", "source_file"]
     )
 
     return IngestionResult(data=combined, file_inventory=inventory)
+
+
+def load_sales_data(source_dir: Path | None = None) -> IngestionResult:
+    """Load, normalize, and combine all sales Excel files in the source folder."""
+    files = discover_excel_files(source_dir)
+
+    if not files:
+        raise FileNotFoundError(
+            "No sales Excel files were found in the configured source folder."
+        )
+
+    return load_sales_files(files)
