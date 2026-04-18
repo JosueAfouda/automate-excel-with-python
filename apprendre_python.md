@@ -1179,3 +1179,272 @@ La prochaine suite logique, apres cette phase, serait par exemple :
 - produire des agregations mensuelles
 - sauvegarder un rapport qualite de transformation
 - ajouter des tests unitaires sur `clean_sales_data(...)`
+
+## 14. Pourquoi le comportement actuel est coherent techniquement, mais pas ideal pour ce projet
+
+Apres l'integration de la transformation, un point important est apparu :
+
+- actuellement, la transformation se relance meme s'il n'y a aucun nouveau fichier Excel
+
+Pour ton projet, ce n'est pas le comportement cible.
+
+Tu veux profiter de l'incremental de bout en bout, donc :
+
+- si aucun nouveau fichier n'est detecte
+- alors la transformation ne doit pas se relancer non plus
+
+### Pourquoi le comportement actuel reste coherent techniquement
+
+Le comportement actuel vient d'un choix de simplicite :
+
+- l'ingestion est incrementale
+- mais la transformation est traitee comme une reconstruction complete a partir de `business_data.csv`
+
+Autrement dit, le pipeline fait ceci :
+
+1. il met a jour les donnees ingerees
+2. puis il reconstruit la vue nettoyee complete
+
+Cette approche est techniquement coherente parce qu'elle garantit que :
+
+- `clean_sales_data.csv` peut toujours etre reconstruit a partir des donnees d'ingestion
+- la logique de transformation reste simple
+- on evite certains cas complexes lies a l'incremental cote nettoyage
+
+Dans certains projets, ce choix est tout a fait acceptable.
+
+### Pourquoi ce n'est pas ideal dans ton cas
+
+Dans ton projet, l'objectif principal est justement :
+
+- eviter le retraitement inutile
+- reduire le temps d'execution
+- profiter de l'incremental sur toute la chaine
+
+Dans ce contexte, relancer la transformation alors qu'aucune nouvelle donnee n'est arrivee n'apporte rien.
+
+Donc, meme si le comportement actuel est defendable techniquement, il n'est pas aligne avec le besoin fonctionnel du projet.
+
+### Pourquoi la transformation incrementale est plus subtile que l'ingestion incrementale
+
+L'ingestion incrementale est relativement simple :
+
+- on detecte les nouveaux fichiers
+- on lit uniquement ces fichiers
+
+La transformation incrementale demande un peu plus de vigilance, car elle ne fait pas seulement de la lecture.
+
+Elle applique aussi des regles metier comme :
+
+- filtrage
+- normalisation
+- suppression de doublons
+
+Par exemple, dans ton nettoyage, on dedoublonne sur `transaction_id`.
+
+Cela veut dire que si un nouveau lot contient un `transaction_id` deja present dans `clean_sales_data.csv`, il faut savoir quoi faire :
+
+- ignorer la nouvelle ligne
+- remplacer l'ancienne
+- garder la premiere
+
+Ce point montre pourquoi la transformation incrementale demande plus de reflexion que l'ingestion incrementale.
+
+### La direction cible pour ce projet
+
+Pour ton projet, la bonne direction est la suivante :
+
+1. detection des nouveaux fichiers Excel
+2. ingestion uniquement des nouvelles donnees
+3. si aucun nouveau fichier :
+   pas de transformation
+4. si de nouvelles donnees existent :
+   transformation uniquement de ces nouvelles lignes
+5. ajout des lignes nettoyees a `clean_sales_data.csv`
+6. verification des doublons avec l'historique deja nettoye
+
+Autrement dit :
+
+- ingestion incrementale
+- transformation incrementale
+
+Cela permet de profiter de l'incremental de bout en bout.
+
+### Ce qu'il faut retenir
+
+Il faut bien distinguer deux choses :
+
+- une solution techniquement coherente
+- une solution adaptee a ton objectif
+
+La reconstruction complete de la transformation est :
+
+- simple
+- robuste
+- techniquement defendable
+
+Mais pour ce projet, la meilleure solution est une transformation incrementale, car elle est plus coherente avec ton objectif principal :
+
+- ne rien retraiter inutilement
+
+### Ce qui sera implemente ensuite
+
+La suite logique sera donc de faire evoluer le pipeline pour que :
+
+- s'il n'y a aucun nouveau fichier, la transformation ne s'execute pas
+- s'il y a de nouvelles lignes, seules ces lignes soient nettoyees
+- `clean_sales_data.csv` soit mis a jour incrementalement
+
+Cela rendra le pipeline plus proche d'un vrai pipeline incremental de production.
+
+## 15. Implementation finale de la transformation incrementale
+
+La transformation incrementale a maintenant ete implementee dans le pipeline.
+
+Cette section decrit le comportement final, qui remplace le design intermediaire explique plus haut.
+
+### Idee cle
+
+Le pipeline ne decide plus de lancer la transformation uniquement a partir des fichiers Excel nouvellement ingeres pendant le run courant.
+
+Il compare maintenant :
+
+- les fichiers deja ingeres avec succes
+- les fichiers deja presents dans `clean_sales_data.csv`
+
+La transformation traite uniquement les fichiers qui sont :
+
+- deja ingeres
+- mais pas encore transformes
+
+### Pourquoi cette approche est meilleure
+
+Cette logique est plus robuste que :
+
+- "transformer tout"
+- ou "transformer seulement les fichiers ingeres pendant ce run"
+
+Pourquoi ?
+
+Parce qu'elle gere aussi les cas de rattrapage.
+
+Exemple concret dans ton projet :
+
+- les fichiers `2019-05.xls` et `2019-06.xls` avaient deja ete ingeres
+- mais ils n'etaient pas encore presents dans `clean_sales_data.csv`
+
+Avec la nouvelle logique, le pipeline a pu :
+
+- detecter qu'ils etaient deja ingeres
+- voir qu'ils n'etaient pas encore transformes
+- les nettoyer
+- les ajouter a la sortie de transformation
+
+Cela permet de remettre le pipeline dans un etat coherent sans retraiter toute l'historique.
+
+### Comment le pipeline determine les fichiers a transformer
+
+Le pipeline utilise deux sources d'information :
+
+1. `outputs/ingestion/ingestion_metadata.csv`
+   pour savoir quels fichiers ont ete charges avec succes
+2. `outputs/transformation/clean_sales_data.csv`
+   pour savoir quels fichiers ont deja produit des lignes nettoyees
+
+Comme `clean_sales_data.csv` conserve :
+
+- `source_file`
+- `source_folder`
+
+on peut retrouver tres simplement la liste des fichiers deja transformes.
+
+Le pipeline calcule ensuite :
+
+- fichiers ingeres
+- moins
+- fichiers deja transformes
+
+Le resultat correspond aux fichiers restant a transformer.
+
+### Le comportement final du pipeline
+
+Le pipeline suit maintenant cette logique :
+
+1. detection des nouveaux fichiers Excel a ingerer
+2. ingestion incrementale des nouveaux fichiers uniquement
+3. lecture de l'etat de transformation actuel
+4. identification des fichiers ingeres mais non encore transformes
+5. transformation uniquement des lignes venant de ces fichiers
+6. ajout des lignes nettoyees a `clean_sales_data.csv`
+
+### Ce qui se passe s'il n'y a aucun nouveau fichier
+
+Il faut distinguer deux cas.
+
+#### Cas 1 : aucun nouveau fichier et aucune transformation en retard
+
+Dans ce cas :
+
+- l'ingestion est sautee
+- la transformation est sautee
+
+Le pipeline ne refait aucun travail inutile.
+
+C'est le comportement incremental cible en regime nominal.
+
+#### Cas 2 : aucun nouveau fichier, mais certaines donnees ne sont pas encore transformees
+
+Dans ce cas :
+
+- l'ingestion reste sautee
+- la transformation traite seulement les fichiers en retard
+
+Ce cas correspond a une mise a niveau de l'etat du pipeline.
+
+Une fois ce rattrapage termine, les runs suivants ne relanceront plus la transformation tant qu'aucun nouveau fichier n'apparait.
+
+### Deduplication entre lots
+
+Le nettoyage dedoublonne deja les lignes a l'interieur d'un lot avec :
+
+- `transaction_id`
+
+J'ai ajoute en plus une protection au moment de l'append dans `clean_sales_data.csv` :
+
+- si un `transaction_id` nettoye existe deja dans la sortie finale
+- la nouvelle ligne est ignoree
+
+Cela permet d'eviter d'introduire des doublons entre plusieurs runs incrementaux.
+
+### Correction importante sur les dates
+
+J'ai aussi corrige un point subtil dans `cleaning.py`.
+
+Quand les donnees venaient de CSV deja ecrits par le pipeline, la colonne `transaction_date` pouvait contenir des formats mixtes comme :
+
+- `2019-01-01`
+- `2019-03-01 00:00:00`
+
+J'ai donc utilise :
+
+```python
+pd.to_datetime(..., format="mixed", errors="coerce")
+```
+
+Pourquoi ?
+
+Sans cela, pandas pouvait mal parser une partie des dates et eliminer a tort certaines lignes lors du nettoyage.
+
+### Ce que cette implementation t'apprend
+
+Cette version finale montre une idee tres importante :
+
+- un pipeline incremental ne doit pas seulement detecter les nouvelles donnees
+- il doit aussi suivre l'etat d'avancement de chaque etape
+
+Dans ton projet :
+
+- l'etat d'ingestion est porte par `ingestion_metadata.csv`
+- l'etat de transformation est deduit a partir de `clean_sales_data.csv`
+
+Cela te donne deja une petite architecture de pipeline tres proche de vraies pratiques de production.

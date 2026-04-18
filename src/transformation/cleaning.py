@@ -61,7 +61,11 @@ def clean_sales_data(raw_df: pd.DataFrame) -> CleaningResult:
     df["contract_type"] = (
         df["contract_type"].astype("string").str.upper().str.strip()
     )
-    df["transaction_date"] = pd.to_datetime(df["transaction_date"], errors="coerce")
+    df["transaction_date"] = pd.to_datetime(
+        df["transaction_date"],
+        errors="coerce",
+        format="mixed",
+    )
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
 
     df = df[df["transaction_date"].notna()]

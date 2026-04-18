@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from .logging_config import configure_logging
-from .transformation.cleaning import CleaningResult, clean_sales_data
+from .transformation.cleaning import clean_sales_data
 
 from .ingestion.sales_ingestion import (
     IngestionResult,
@@ -94,6 +94,50 @@ def read_business_data(business_data_path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
     return pd.read_csv(business_data_path)
+
+
+def read_clean_sales_data(clean_data_path: Path) -> pd.DataFrame:
+    """Load the cleaned sales data CSV if it exists."""
+    if not clean_data_path.exists():
+        return pd.DataFrame()
+
+    logger.info("Loading cleaned sales data from %s", clean_data_path)
+    return pd.read_csv(clean_data_path)
+
+
+def get_file_keys_from_clean_data(clean_data: pd.DataFrame) -> set[tuple[str, str]]:
+    """Return the set of source files already present in the clean output."""
+    if clean_data.empty:
+        return set()
+
+    required_columns = {"source_folder", "source_file"}
+    if not required_columns.issubset(clean_data.columns):
+        return set()
+
+    source_folders = clean_data["source_folder"].fillna("").astype(str)
+    source_files = clean_data["source_file"].fillna("").astype(str)
+    return set(zip(source_folders, source_files))
+
+
+def filter_rows_for_file_keys(
+    data: pd.DataFrame,
+    file_keys: set[tuple[str, str]],
+) -> pd.DataFrame:
+    """Return only the rows whose source file belongs to the given file keys."""
+    if data.empty or not file_keys:
+        return data.iloc[0:0].copy()
+
+    file_key_series = list(
+        zip(
+            data["source_folder"].fillna("").astype(str),
+            data["source_file"].fillna("").astype(str),
+        )
+    )
+    mask = pd.Series(
+        [file_key in file_keys for file_key in file_key_series],
+        index=data.index,
+    )
+    return data[mask].copy()
 
 
 def merge_business_data(
@@ -185,7 +229,7 @@ def save_ingestion_outputs(
 
 
 def save_transformation_outputs(
-    cleaning_result: CleaningResult,
+    clean_data: pd.DataFrame,
     output_dir: Path,
 ) -> dict[str, Path]:
     """Save transformation outputs to CSV files and return their paths."""
@@ -193,9 +237,49 @@ def save_transformation_outputs(
     output_paths = get_transformation_output_paths(output_dir)
 
     logger.info("Writing clean sales data to %s", output_paths["clean_sales_data"])
-    cleaning_result.data.to_csv(output_paths["clean_sales_data"], index=False)
+    clean_data.to_csv(output_paths["clean_sales_data"], index=False)
 
     return output_paths
+
+
+def merge_clean_sales_data(
+    clean_data_path: Path,
+    new_clean_data: pd.DataFrame,
+) -> tuple[pd.DataFrame, int]:
+    """Append only unseen cleaned transactions to the existing clean output."""
+    if not clean_data_path.exists():
+        logger.info("No existing clean sales data found at %s", clean_data_path)
+        return new_clean_data, 0
+
+    existing_clean_data = read_clean_sales_data(clean_data_path)
+    if new_clean_data.empty:
+        return existing_clean_data, 0
+
+    existing_transaction_ids = set(
+        existing_clean_data["transaction_id"].astype("string").dropna()
+    )
+    filtered_new_clean_data = new_clean_data[
+        ~new_clean_data["transaction_id"].astype("string").isin(existing_transaction_ids)
+    ].copy()
+    skipped_duplicates = len(new_clean_data) - len(filtered_new_clean_data)
+
+    if skipped_duplicates:
+        logger.info(
+            "Skipped %s cleaned row(s) already present in clean_sales_data.csv",
+            skipped_duplicates,
+        )
+
+    if filtered_new_clean_data.empty:
+        return existing_clean_data, skipped_duplicates
+
+    merged_clean_data = pd.concat(
+        [existing_clean_data, filtered_new_clean_data],
+        ignore_index=True,
+    )
+    merged_clean_data = merged_clean_data.sort_values(
+        ["transaction_date", "transaction_id"]
+    ).reset_index(drop=True)
+    return merged_clean_data, skipped_duplicates
 
 
 def run_pipeline(
@@ -205,8 +289,9 @@ def run_pipeline(
     """Run the current pipeline and return the generated file paths."""
     log_file = configure_logging()
     ingestion_output_dir = output_dir or get_project_root() / "outputs" / "ingestion"
-    transformation_output_dir = get_project_root() / "outputs" / "transformation"
+    transformation_output_dir = ingestion_output_dir.parent / "transformation"
     ingestion_output_paths = get_output_paths(ingestion_output_dir)
+    transformation_output_paths = get_transformation_output_paths(transformation_output_dir)
     logger.info("File logging configured at %s", log_file)
     logger.info("Starting pipeline run with ingestion output directory %s", ingestion_output_dir)
     validate_incremental_outputs(ingestion_output_paths)
@@ -231,8 +316,9 @@ def run_pipeline(
     )
 
     if not new_files:
-        logger.info("No new files to ingest. Pipeline outputs remain unchanged.")
+        logger.info("No new files to ingest.")
         current_business_data = read_business_data(ingestion_output_paths["business_data"])
+        current_ingestion_metadata = existing_metadata
         ingestion_output_paths_result = ingestion_output_paths
         rows_ingested = 0
     else:
@@ -246,6 +332,7 @@ def run_pipeline(
         )
         ingestion_output_paths_result = save_ingestion_outputs(merged_result, ingestion_output_dir)
         current_business_data = merged_result.data
+        current_ingestion_metadata = merged_result.file_inventory
         rows_ingested = len(ingestion_result.data)
         logger.info(
             "Ingestion stage completed: %s new file(s) processed, %s row(s) ingested",
@@ -253,15 +340,54 @@ def run_pipeline(
             rows_ingested,
         )
 
-    logger.info("Starting transformation stage on %s row(s)", len(current_business_data))
-    cleaning_result = clean_sales_data(current_business_data)
-    transformation_output_paths = save_transformation_outputs(
-        cleaning_result,
-        transformation_output_dir,
+    existing_clean_data = read_clean_sales_data(transformation_output_paths["clean_sales_data"])
+    transformed_file_keys = get_file_keys_from_clean_data(existing_clean_data)
+    loaded_file_keys = get_loaded_file_keys(current_ingestion_metadata)
+    pending_transformation_keys = loaded_file_keys - transformed_file_keys
+
+    logger.info(
+        "Transformation selection complete: %s file(s) pending transformation",
+        len(pending_transformation_keys),
+    )
+
+    if not pending_transformation_keys:
+        logger.info("No pending files to transform. Transformation stage skipped.")
+        combined_output_paths = {
+            **ingestion_output_paths_result,
+            **transformation_output_paths,
+        }
+        logger.info("Pipeline run completed successfully with no pending transformation")
+        return PipelineRunResult(
+            output_paths=combined_output_paths,
+            new_files_processed=len(new_files),
+            skipped_files=skipped_files,
+            rows_ingested=rows_ingested,
+            rows_cleaned=0,
+        )
+
+    raw_rows_to_transform = filter_rows_for_file_keys(
+        current_business_data,
+        pending_transformation_keys,
     )
     logger.info(
-        "Transformation stage completed: %s cleaned row(s) written",
-        len(cleaning_result.data),
+        "Starting transformation stage on %s raw row(s) from %s file(s)",
+        len(raw_rows_to_transform),
+        len(pending_transformation_keys),
+    )
+    cleaning_result = clean_sales_data(raw_rows_to_transform)
+    merged_clean_data, skipped_clean_duplicates = merge_clean_sales_data(
+        transformation_output_paths["clean_sales_data"],
+        cleaning_result.data,
+    )
+    transformation_output_paths = save_transformation_outputs(
+        merged_clean_data,
+        transformation_output_dir,
+    )
+    rows_cleaned = len(cleaning_result.data) - skipped_clean_duplicates
+    logger.info(
+        "Transformation stage completed: %s cleaned row(s) appended, %s duplicate row(s) skipped",
+        rows_cleaned,
+        skipped_clean_duplicates,
     )
     combined_output_paths = {
         **ingestion_output_paths_result,
@@ -273,5 +399,5 @@ def run_pipeline(
         new_files_processed=len(new_files),
         skipped_files=skipped_files,
         rows_ingested=rows_ingested,
-        rows_cleaned=len(cleaning_result.data),
+        rows_cleaned=rows_cleaned,
     )
