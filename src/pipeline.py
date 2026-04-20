@@ -14,6 +14,7 @@ from .analytic.kpis import (
 )
 from .logging_config import configure_logging
 from .reporting.excel_report import create_management_report
+from .runtime import get_outputs_root, get_runtime_root
 from .transformation.cleaning import clean_sales_data
 
 from .ingestion.sales_ingestion import (
@@ -363,10 +364,13 @@ def merge_clean_sales_data(
 def run_pipeline(
     output_dir: Path | None = None,
     source_dir: Path | None = None,
+    runtime_root: Path | None = None,
+    log_file: Path | None = None,
 ) -> PipelineRunResult:
     """Run the current pipeline and return the generated file paths."""
-    log_file = configure_logging()
-    ingestion_output_dir = output_dir or get_project_root() / "outputs" / "ingestion"
+    resolved_runtime_root = get_runtime_root(runtime_root)
+    configured_log_file = configure_logging(log_file=log_file, runtime_root=resolved_runtime_root)
+    ingestion_output_dir = output_dir or get_outputs_root(resolved_runtime_root) / "ingestion"
     output_root_dir = ingestion_output_dir.parent
     transformation_output_dir = output_root_dir / "transformation"
     analytics_output_dir = output_root_dir / "analytics"
@@ -374,7 +378,8 @@ def run_pipeline(
     ingestion_output_paths = get_output_paths(ingestion_output_dir)
     transformation_output_paths = get_transformation_output_paths(transformation_output_dir)
     analytics_output_paths = get_analytics_output_paths(analytics_output_dir)
-    logger.info("File logging configured at %s", log_file)
+    logger.info("File logging configured at %s", configured_log_file)
+    logger.info("Runtime root resolved to %s", resolved_runtime_root)
     logger.info("Starting pipeline run with ingestion output directory %s", ingestion_output_dir)
     validate_incremental_outputs(ingestion_output_paths)
 

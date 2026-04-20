@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from ..runtime import get_raw_sales_data_dir
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,7 +40,7 @@ def get_project_root() -> Path:
 
 def discover_excel_files(source_dir: Path | None = None) -> list[Path]:
     """Find sales Excel files in the raw input folder."""
-    target_dir = source_dir or get_project_root() / "raw_sales_data"
+    target_dir = source_dir or get_raw_sales_data_dir()
 
     if not target_dir.exists():
         logger.warning("Source directory does not exist: %s", target_dir)

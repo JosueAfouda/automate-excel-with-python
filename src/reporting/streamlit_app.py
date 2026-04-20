@@ -11,16 +11,17 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.analytic.kpis import build_kpi_bundle
+from src.runtime import get_outputs_root, get_runtime_root
 
 
 def get_project_root() -> Path:
     """Return the root folder of the project."""
-    return PROJECT_ROOT
+    return get_runtime_root()
 
 
 def get_analytics_paths() -> dict[str, Path]:
     """Return the analytics CSV paths used by the dashboard."""
-    analytics_dir = get_project_root() / "outputs" / "analytics"
+    analytics_dir = get_outputs_root() / "analytics"
     return {
         "overview": analytics_dir / "kpi_overview.csv",
         "monthly": analytics_dir / "monthly_kpis.csv",
@@ -35,7 +36,7 @@ def get_reporting_paths() -> dict[str, Path]:
     """Return the CSV paths used by the reporting app."""
     paths = get_analytics_paths()
     paths["clean_sales_data"] = (
-        get_project_root() / "outputs" / "transformation" / "clean_sales_data.csv"
+        get_outputs_root() / "transformation" / "clean_sales_data.csv"
     )
     return paths
 

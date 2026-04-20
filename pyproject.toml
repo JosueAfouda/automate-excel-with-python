@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sales-office-pipeline"
+version = "0.1.0"
+description = "Enterprise-style Python pipeline for Excel-based sales ingestion, analytics, and reporting."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Internal Data Engineering Team" }
+]
+dependencies = [
+  "pandas>=2.2,<3.0",
+  "openpyxl>=3.1,<4.0",
+  "xlrd>=2.0,<3.0",
+  "XlsxWriter>=3.2,<4.0",
+  "streamlit>=1.40,<2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2,<2.0",
+  "pytest>=8.0,<9.0",
+]
+
+[project.scripts]
+sales-pipeline = "src.cli:main"
+
+[tool.setuptools]
+include-package-data = false
+packages = [
+  "src",
+  "src.analytic",
+  "src.ingestion",
+  "src.reporting",
+  "src.transformation",
+]

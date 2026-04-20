@@ -1,0 +1,6 @@
+[runtime]
+environment = "dev"
+runtime_root = ".."
+source_dir = "../raw_sales_data"
+ingestion_output_dir = "../outputs/ingestion"
+log_file = "../outputs/logs/pipeline.log"

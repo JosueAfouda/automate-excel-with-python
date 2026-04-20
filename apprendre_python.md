@@ -2015,3 +2015,276 @@ Autrement dit, un bon reporting n'est pas seulement un export Excel :
 
 - c'est un produit de communication pour la decision
 - il doit etre stable, clair et sans ambiguite
+
+## Packaging et distribution en contexte entreprise
+
+J'ai ajoute une vraie phase de packaging du projet pour sortir d'une logique "script local de developpeur" et aller vers une logique "application interne exploitable".
+
+### Pourquoi cette phase est importante
+
+Dans un projet d'entreprise, surtout en contexte bureautique et Windows, le code ne doit pas seulement fonctionner :
+
+- il doit etre installable
+- il doit etre lancable de maniere standard
+- il doit etre comprenable par les Ops
+- il doit pouvoir tourner sur un poste de service ou une VM
+
+Autrement dit, le but n'est plus seulement de coder une logique metier, mais de livrer un composant exploitable.
+
+### Ce qui a ete ajoute
+
+#### 1. Un `pyproject.toml`
+
+Le projet dispose maintenant d'un vrai manifeste de package Python.
+
+Ce fichier declare :
+
+- le nom du package distribue
+- la version
+- les dependances
+- le point d'entree CLI
+
+Pourquoi c'est important :
+
+- on formalise l'installation
+- on peut construire un wheel
+- on evite de dependre d'une installation manuelle floue
+
+#### 2. Une CLI officielle
+
+J'ai ajoute `src/cli.py` avec deux commandes :
+
+- `sales-pipeline run`
+- `sales-pipeline check`
+
+La premiere lance le pipeline.
+La seconde verifie le runtime avant execution.
+
+Pourquoi c'est important pour les Ops :
+
+- il y a une commande officielle unique
+- le retour est standardise
+- les statuts sont plus faciles a exploiter dans un ordonnanceur ou un script PowerShell
+
+#### 3. Une notion de `runtime root`
+
+Avant, le projet supposait implicitement que :
+
+- les fichiers sources
+- les outputs
+- les logs
+
+etaient situes autour du dossier du depot.
+
+Ce n'est pas ideal pour une application installee.
+
+J'ai donc ajoute `src/runtime.py` pour definir un dossier de travail d'execution :
+
+- soit passe explicitement
+- soit fourni par variable d'environnement
+- soit deduit depuis le dossier courant
+
+Cela permet de separer :
+
+- le code installe
+- les donnees d'entree
+- les sorties et logs d'exploitation
+
+Cette distinction est tres importante en entreprise.
+
+#### 4. Des scripts PowerShell d'exploitation
+
+J'ai ajoute :
+
+- `scripts/install_runtime.ps1`
+- `scripts/run_pipeline.ps1`
+- `scripts/check_environment.ps1`
+- `scripts/build_package.ps1`
+
+Ces scripts servent de couche pratique pour :
+
+- installer un `venv`
+- installer le package
+- verifier le runtime
+- lancer le batch
+- construire le wheel
+
+C'est tres proche de ce qu'on ferait sur un poste Windows gere ou sur une VM de service.
+
+### Ce que cela apporte concretement
+
+Avec cette evolution, le projet peut maintenant etre distribue sous une forme plus professionnelle :
+
+- on peut construire un wheel Python
+- on peut installer le package dans un environnement virtuel dedie
+- on peut lancer le pipeline via une CLI stable
+- on peut verifier l'environnement avant execution
+- on peut externaliser les chemins de travail au lieu de les coder en dur
+
+### Ce que cela apprend sur la vraie vie en entreprise
+
+Cette phase montre une idee essentielle :
+
+- le developpeur ne fait pas seulement du code metier
+- il doit aussi rendre son application exploitable
+
+Pour aider les Ops, il faut livrer :
+
+- un point d'entree unique
+- une configuration separable du code
+- des logs clairs
+- des scripts de lancement
+- un packaging reproductible
+
+### Exemple de logique d'exploitation
+
+Sur une VM Windows interne ou un poste robot, le flux peut ressembler a ceci :
+
+1. installation du package dans un `venv`
+2. verification du runtime avec `sales-pipeline check`
+3. planification du lancement via PowerShell ou ordonnanceur
+4. execution du batch avec `sales-pipeline run`
+5. lecture des logs et du code retour
+
+Cette approche est beaucoup plus saine qu'un simple script lance manuellement depuis le poste du developpeur.
+
+### Ce qu'il faut retenir
+
+Le packaging n'est pas une formalite technique.
+
+Dans un contexte entreprise, il sert a transformer un projet Python en composant :
+
+- installable
+- versionnable
+- distribuable
+- supervisable
+- relancable
+
+Autrement dit :
+
+- la logique metier repond au besoin fonctionnel
+- le packaging rend cette logique deployable et exploitable
+
+## Configuration externe et runbook Ops
+
+Apres le packaging, j'ai ajoute une couche supplementaire tres importante pour un contexte entreprise :
+
+- une configuration externe
+- une documentation d'exploitation
+- un scenario de test d'installation propre
+
+### Pourquoi une couche config est necessaire
+
+Si les Ops doivent modifier le code pour changer :
+
+- le dossier de travail
+- le dossier des fichiers source
+- le dossier de sortie
+- le chemin du log
+- l'environnement cible
+
+alors l'application n'est pas vraiment industrialisee.
+
+Une bonne pratique consiste a separer :
+
+- le code
+- la configuration
+- les donnees
+
+### Ce qui a ete ajoute
+
+J'ai ajoute :
+
+- `src/settings.py`
+- `config/dev.toml`
+- `config/recette.toml`
+- `config/prod.toml`
+
+La logique de priorite est la suivante :
+
+1. arguments CLI
+2. variables d'environnement
+3. fichier TOML
+4. valeurs par defaut
+
+C'est une approche tres saine car elle permet :
+
+- aux developpeurs de tester localement
+- aux Ops de piloter l'execution sans modifier le code
+- aux environnements `dev`, `recette`, `prod` d'etre mieux separes
+
+### Pourquoi TOML est un bon choix ici
+
+J'ai choisi TOML car :
+
+- il est lisible
+- il est simple
+- Python 3.11 sait le lire nativement avec `tomllib`
+
+Cela evite d'ajouter une dependance externe juste pour la configuration.
+
+### Ce que la CLI sait maintenant faire
+
+La commande peut maintenant utiliser explicitement un fichier de config :
+
+```bash
+sales-pipeline check --config config/prod.toml --runtime-root .
+sales-pipeline run --config config/prod.toml --runtime-root .
+```
+
+Cela rend le comportement plus explicite et plus proche d'une exploitation reelle.
+
+### Le role du runbook Ops
+
+J'ai ajoute :
+
+- `docs/runbook_ops.md`
+
+Le runbook ne sert pas a expliquer le code. Il sert a expliquer l'exploitation.
+
+Il doit dire :
+
+- comment installer
+- comment verifier l'environnement
+- comment lancer le traitement
+- ou sont les logs
+- quel est le rapport attendu
+- comment relancer en cas d'erreur
+
+En entreprise, ce document est fondamental, car il reduit la dependance a la connaissance tacite du developpeur.
+
+### Le test d'installation dans un venv propre
+
+J'ai aussi ajoute :
+
+- `docs/test_installation_venv.md`
+
+Ce document reproduit le travail d'un integrateur ou d'un Ops :
+
+1. creer un environnement virtuel vide
+2. installer le package avec `pip install .`
+3. verifier que la commande `sales-pipeline` existe
+4. executer `check`
+5. executer `run`
+
+Pourquoi ce test est important ?
+
+Parce qu'il valide que le projet n'est pas seulement utilisable depuis ton poste de developpement, mais aussi depuis un environnement propre.
+
+### Ce que cette phase t'apprend
+
+Cette phase montre une difference essentielle entre :
+
+- un projet Python qui "fonctionne"
+- un projet Python qui peut etre confie a l'exploitation
+
+Pour franchir cette etape, il faut :
+
+- une commande officielle
+- une configuration exterieure au code
+- une documentation Ops
+- un test d'installation reproductible
+
+Autrement dit, industrialiser un projet Python, ce n'est pas seulement packager :
+
+- c'est aussi preparer son usage par d'autres que le developpeur

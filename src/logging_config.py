@@ -1,6 +1,8 @@
 import logging
 from pathlib import Path
 
+from .runtime import get_default_log_file
+
 
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 
@@ -10,9 +12,12 @@ def get_project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def configure_logging(log_file: Path | None = None) -> Path:
+def configure_logging(
+    log_file: Path | None = None,
+    runtime_root: Path | None = None,
+) -> Path:
     """Configure file logging for the pipeline and return the log file path."""
-    target_log_file = log_file or get_project_root() / "outputs" / "logs" / "pipeline.log"
+    target_log_file = log_file or get_default_log_file(runtime_root)
     target_log_file.parent.mkdir(parents=True, exist_ok=True)
 
     root_logger = logging.getLogger()

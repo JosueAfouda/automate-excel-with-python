@@ -1,0 +1,28 @@
+param(
+    [string]$RuntimeRoot = (Resolve-Path "$PSScriptRoot\..").Path,
+    [string]$ConfigPath = "",
+    [string]$LogFile = ""
+)
+
+$ErrorActionPreference = "Stop"
+
+$venvExe = Join-Path $RuntimeRoot ".venv\Scripts\sales-pipeline.exe"
+
+if (-not (Test-Path $venvExe)) {
+    throw "sales-pipeline executable not found. Run scripts\install_runtime.ps1 first."
+}
+
+$defaultConfig = Join-Path $RuntimeRoot "config\prod.toml"
+$arguments = @("run", "--runtime-root", $RuntimeRoot)
+if ($ConfigPath -ne "") {
+    $arguments += @("--config", $ConfigPath)
+}
+elseif (Test-Path $defaultConfig) {
+    $arguments += @("--config", $defaultConfig)
+}
+if ($LogFile -ne "") {
+    $arguments += @("--log-file", $LogFile)
+}
+
+& $venvExe @arguments
+exit $LASTEXITCODE
