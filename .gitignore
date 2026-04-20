@@ -212,3 +212,4 @@ __marimo__/
 !published_data/analytics/
 !published_data/transformation/
 !published_data/**/*.csv
+!packaging/*.spec
