@@ -24,9 +24,15 @@ dev = [
   "build>=1.2,<2.0",
   "pytest>=8.0,<9.0",
 ]
+dashboard-build = [
+  "pyinstaller>=6.11,<7.0",
+]
 
 [project.scripts]
 sales-pipeline = "src.cli:main"
+sales-dashboard = "src.reporting.dashboard_launcher:main"
+sales-dashboard-check-update = "src.reporting.dashboard_updater:main"
+sales-dashboard-publish-data = "src.reporting.dashboard_publish:main"
 
 [tool.setuptools]
 include-package-data = false

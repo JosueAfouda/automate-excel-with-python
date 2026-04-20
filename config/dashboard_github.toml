@@ -1,0 +1,8 @@
+[dashboard]
+mode = "github_raw"
+remote_data_base_url = "https://raw.githubusercontent.com/JosueAfouda/automate-excel-with-python/executable/streamlit/published_data"
+release_manifest_url = "https://raw.githubusercontent.com/JosueAfouda/automate-excel-with-python/executable/streamlit/published_app/dashboard_release.json"
+check_for_updates = true
+auto_open_browser = true
+server_port = 8501
+headless = false

@@ -208,3 +208,7 @@ __marimo__/
 
 *.xls
 *.csv
+!published_data/
+!published_data/analytics/
+!published_data/transformation/
+!published_data/**/*.csv

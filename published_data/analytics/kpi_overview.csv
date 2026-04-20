@@ -1,0 +1,10 @@
+metric,value
+period_start,2019-01-01
+period_end,2019-12-31
+total_revenue,1053572.15
+total_transactions,67268
+average_ticket,15.662308229767495
+new_revenue,0.0
+existing_revenue,1053572.15
+new_revenue_share,0.0
+stores_count,6

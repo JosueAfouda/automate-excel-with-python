@@ -11,50 +11,18 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.analytic.kpis import build_kpi_bundle
-from src.runtime import get_outputs_root, get_runtime_root
-
-
-def get_project_root() -> Path:
-    """Return the root folder of the project."""
-    return get_runtime_root()
-
-
-def get_analytics_paths() -> dict[str, Path]:
-    """Return the analytics CSV paths used by the dashboard."""
-    analytics_dir = get_outputs_root() / "analytics"
-    return {
-        "overview": analytics_dir / "kpi_overview.csv",
-        "monthly": analytics_dir / "monthly_kpis.csv",
-        "by_store": analytics_dir / "kpis_by_store.csv",
-        "by_plan": analytics_dir / "kpis_by_plan.csv",
-        "quality": analytics_dir / "analytics_quality.csv",
-        "file_inventory": analytics_dir / "analytics_file_inventory.csv",
-    }
-
-
-def get_reporting_paths() -> dict[str, Path]:
-    """Return the CSV paths used by the reporting app."""
-    paths = get_analytics_paths()
-    paths["clean_sales_data"] = (
-        get_outputs_root() / "transformation" / "clean_sales_data.csv"
-    )
-    return paths
-
-
-def get_reporting_signatures(paths: dict[str, Path]) -> tuple[int, ...]:
-    """Return file signatures used to invalidate Streamlit cache on data refresh."""
-    return tuple(path.stat().st_mtime_ns for path in paths.values())
-
-
-def get_latest_analytics_update() -> str:
-    """Return the latest modification timestamp across analytics output files."""
-    analytics_paths = get_analytics_paths()
-    existing_paths = [path for path in analytics_paths.values() if path.exists()]
-    if not existing_paths:
-        return "n/a"
-
-    latest_timestamp = max(path.stat().st_mtime for path in existing_paths)
-    return pd.Timestamp.fromtimestamp(latest_timestamp).strftime("%Y-%m-%d %H:%M:%S")
+from src.reporting.dashboard_data_source import (
+    describe_data_sources,
+    get_dataset_locations,
+    get_dataset_signatures,
+    load_dashboard_frames,
+)
+from src.reporting.dashboard_settings import DashboardSettings, load_dashboard_settings
+from src.reporting.dashboard_updater import (
+    DashboardUpdateStatus,
+    get_dashboard_update_status,
+)
+from src.reporting.dashboard_version import DASHBOARD_VERSION
 
 
 def format_currency(value: float) -> str:
@@ -111,25 +79,41 @@ def normalize_dashboard_data(
 
 @st.cache_data(show_spinner=False)
 def load_dashboard_data(
-    file_signatures: tuple[int, ...],
+    file_signatures: tuple[str, ...],
+    settings: DashboardSettings,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Load all datasets required by the dashboard."""
     del file_signatures
-    paths = get_reporting_paths()
-    missing_files = [str(path) for path in paths.values() if not path.exists()]
-    if missing_files:
-        raise FileNotFoundError(
-            "Missing reporting inputs: " + ", ".join(missing_files)
-        )
-
-    clean_df = pd.read_csv(paths["clean_sales_data"])
-    quality_df = pd.read_csv(paths["quality"])
-    file_inventory_df = pd.read_csv(paths["file_inventory"])
+    locations = get_dataset_locations(settings)
+    clean_df, quality_df, file_inventory_df = load_dashboard_frames(locations)
     return normalize_dashboard_data(
         clean_df,
         quality_df,
         file_inventory_df,
     )
+
+
+def get_latest_analytics_update(quality_df: pd.DataFrame) -> str:
+    """Return the latest analytics run timestamp from the quality CSV."""
+    if quality_df.empty or "run_timestamp" not in quality_df.columns:
+        return "n/a"
+
+    timestamps = pd.to_datetime(
+        quality_df["run_timestamp"],
+        errors="coerce",
+        utc=True,
+    ).dropna()
+    if timestamps.empty:
+        return "n/a"
+
+    latest_timestamp = timestamps.max()
+    return latest_timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def load_update_status(settings: DashboardSettings) -> DashboardUpdateStatus:
+    """Load remote release metadata for the dashboard."""
+    return get_dashboard_update_status(settings)
 
 
 def apply_filters(
@@ -292,6 +276,7 @@ def render_pipeline_audit_section(
 
 def main() -> None:
     """Render the Streamlit KPI dashboard."""
+    settings = load_dashboard_settings()
     st.set_page_config(
         page_title="Sales KPI Dashboard",
         layout="wide",
@@ -300,7 +285,8 @@ def main() -> None:
 
     st.title("Tableau de bord KPI des ventes")
     st.caption(
-        "Ce tableau de bord lit directement les sorties analytics generees par le pipeline."
+        "Ce tableau de bord lit les sorties deja generees par le pipeline. "
+        "Il ne relance pas les calculs: il consomme uniquement des CSV publies."
     )
 
     with st.sidebar:
@@ -310,19 +296,33 @@ def main() -> None:
             st.cache_data.clear()
             st.rerun()
 
-    reporting_paths = get_reporting_paths()
+    data_locations = get_dataset_locations(settings)
 
     try:
-        file_signatures = get_reporting_signatures(reporting_paths)
+        file_signatures = get_dataset_signatures(data_locations)
         clean_df, pipeline_quality_df, pipeline_inventory_df = load_dashboard_data(
-            file_signatures
+            file_signatures,
+            settings,
         )
-    except FileNotFoundError as error:
+    except (FileNotFoundError, RuntimeError) as error:
         st.error(str(error))
         st.info(
-            "Execute d'abord le pipeline pour generer les fichiers de transformation et analytics, puis relance l'application Streamlit."
+            "Verifie la source de donnees configuree. En mode local, execute d'abord "
+            "le pipeline. En mode publie, publie puis pousse les CSV du dashboard."
         )
         return
+
+    update_status = load_update_status(settings)
+    if update_status.update_available:
+        download_text = (
+            f" [Telecharger la nouvelle build]({update_status.download_url})"
+            if update_status.download_url
+            else ""
+        )
+        st.info(
+            f"Une nouvelle version du dashboard est disponible ({update_status.latest_version})."
+            f"{download_text}"
+        )
 
     available_months = sorted(clean_df["year_month"].dropna().unique().tolist())
     available_stores = sorted(clean_df["store"].dropna().unique().tolist())
@@ -344,9 +344,14 @@ def main() -> None:
             options=available_plans,
             default=available_plans,
         )
+        st.markdown("**Version du dashboard**")
+        st.code(DASHBOARD_VERSION, language="text")
+        if update_status.message:
+            st.caption(update_status.message)
         st.markdown("**Sources des donnees**")
-        st.code(str(get_project_root() / "outputs" / "transformation"), language="text")
-        st.code(str(get_project_root() / "outputs" / "analytics"), language="text")
+        for label, value in describe_data_sources(settings).items():
+            st.markdown(f"**{label}**")
+            st.code(value, language="text")
 
     filtered_df = apply_filters(
         clean_df,
@@ -370,7 +375,7 @@ def main() -> None:
     overview_map = build_overview_map(overview_df)
     period_start = overview_map.get("period_start", "n/a")
     period_end = overview_map.get("period_end", "n/a")
-    latest_update = get_latest_analytics_update()
+    latest_update = get_latest_analytics_update(pipeline_quality_df)
     st.markdown(f"**Periode couverte :** {period_start} a {period_end}")
     st.caption(f"Derniere mise a jour : {latest_update}")
     render_filter_summary(filtered_df)

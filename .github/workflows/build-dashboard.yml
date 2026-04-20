@@ -1,0 +1,32 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ "executable/streamlit" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install ".[dashboard-build]"
+
+      - name: Build executable
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\scripts\build_dashboard_executable.ps1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SalesDashboard
+          path: dist/

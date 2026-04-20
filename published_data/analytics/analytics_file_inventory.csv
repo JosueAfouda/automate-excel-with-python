@@ -1,0 +1,13 @@
+source_folder,source_file,rows_processed,period_start,period_end,status
+raw_sales_data,2019-01.xls,5098,2019-01-01,2019-01-31,loaded
+raw_sales_data,2019-02.xls,5843,2019-02-01,2019-02-28,loaded
+raw_sales_data,2019-03.xls,5750,2019-03-01,2019-03-29,loaded
+raw_sales_data,2019-04.xls,5383,2019-04-01,2019-04-30,loaded
+raw_sales_data,2019-05.xls,5143,2019-05-01,2019-05-31,loaded
+raw_sales_data,2019-06.xls,5280,2019-06-03,2019-06-28,loaded
+raw_sales_data,2019-07.xls,5811,2019-07-01,2019-07-31,loaded
+raw_sales_data,2019-08.xls,5833,2019-08-01,2019-08-30,loaded
+raw_sales_data,2019-09.xls,5939,2019-09-02,2019-09-30,loaded
+raw_sales_data,2019-10.xls,5708,2019-10-01,2019-10-31,loaded
+raw_sales_data,2019-11.xls,5480,2019-11-01,2019-11-29,loaded
+raw_sales_data,2019-12.xls,6000,2019-12-02,2019-12-31,loaded

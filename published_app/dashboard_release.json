@@ -1,0 +1,11 @@
+{
+  "application": "SalesDashboard",
+  "channel": "stable",
+  "version": "0.1.0",
+  "published_at": "2026-04-20T00:00:00Z",
+  "windows_package_url": "",
+  "linux_package_url": "",
+  "release_notes": "Premiere base de diffusion du dashboard Streamlit en mode executable/portable.",
+  "install_instructions_url": "https://github.com/JosueAfouda/automate-excel-with-python/blob/executable/streamlit/apprendre_python.md",
+  "source_archive_url": "https://github.com/JosueAfouda/automate-excel-with-python/archive/refs/heads/executable/streamlit.zip"
+}

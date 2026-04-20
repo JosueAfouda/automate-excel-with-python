@@ -2288,3 +2288,279 @@ Pour franchir cette etape, il faut :
 Autrement dit, industrialiser un projet Python, ce n'est pas seulement packager :
 
 - c'est aussi preparer son usage par d'autres que le developpeur
+
+## Dashboard Streamlit executable et donnees centralisees
+
+Dans ce projet, l'application `src/reporting/streamlit_app.py` n'est pas le pipeline. Elle ne fait pas les calculs de nettoyage, d'analytics ou de reporting Excel. Elle lit seulement des CSV deja produits par le pipeline.
+
+C'est une distinction tres importante, car cela simplifie beaucoup le deploiement :
+
+- le pipeline peut tourner sur une machine centrale
+- le dashboard peut etre distribue sur les postes utilisateurs
+- les donnees peuvent etre mises a jour sans reconstruire l'application
+
+### Idee cle
+
+Pour des utilisateurs Metier non techniques, on ne veut pas :
+
+- installer Python
+- leur demander de lancer `streamlit run ...`
+- leur demander de gerer un environnement virtuel
+
+On veut leur donner quelque chose de simple :
+
+- un dossier applicatif
+- un executable Windows
+- un double-clic sur `SalesDashboard.exe`
+
+Techniquement, une application Streamlit embarquee dans un executable n'est pas une vraie application desktop native. C'est plutot :
+
+1. un launcher executable
+2. qui demarre Streamlit localement
+3. puis ouvre le navigateur sur `localhost`
+
+Mais du point de vue utilisateur, l'experience est proche d'un logiciel classique.
+
+### Ce qui a ete implemente
+
+J'ai ajoute plusieurs briques pour rendre ce scenario concret.
+
+#### 1. Configuration du dashboard
+
+Nouveaux fichiers :
+
+- `src/reporting/dashboard_settings.py`
+- `config/dashboard_local.toml`
+- `config/dashboard_github.toml`
+
+Le dashboard peut maintenant fonctionner selon deux modes :
+
+- `local`
+- `github_raw`
+
+Le mode `local` lit les sorties du pipeline dans `outputs/`.
+
+Le mode `github_raw` lit des fichiers publies dans GitHub via des URLs de type :
+
+```text
+https://raw.githubusercontent.com/JosueAfouda/automate-excel-with-python/executable/streamlit/published_data/...
+```
+
+Cela simule ici un dossier partage central. En entreprise, cette source serait plutot :
+
+- un partage reseau
+- SharePoint
+- OneDrive d'equipe
+- ou une API interne
+
+#### 2. Dossier de donnees publiees
+
+J'ai ajoute :
+
+- `published_data/analytics/...`
+- `published_data/transformation/clean_sales_data.csv`
+
+Ces fichiers sont maintenant suivis dans Git. Pour cela, j'ai ajuste `.gitignore` afin de continuer a ignorer les CSV generiques tout en autorisant ceux de `published_data/`.
+
+L'idee est la suivante :
+
+1. le pipeline produit ses sorties dans `outputs/`
+2. une etape de publication copie les CSV utiles vers `published_data/`
+3. on commit/push ces fichiers
+4. le dashboard distribue aux utilisateurs lit ces CSV via GitHub Raw
+
+La commande de publication est :
+
+```bash
+python3 -m src.reporting.dashboard_publish --runtime-root .
+```
+
+ou, une fois le package installe :
+
+```bash
+sales-dashboard-publish-data --runtime-root .
+```
+
+#### 3. Dashboard configurable et diffusable
+
+J'ai ajoute :
+
+- `src/reporting/dashboard_launcher.py`
+- `src/reporting/dashboard_data_source.py`
+- `src/reporting/dashboard_updater.py`
+- `src/reporting/dashboard_version.py`
+
+Le dashboard peut maintenant :
+
+- lire une source locale
+- lire une source publiee sur GitHub
+- afficher sa version
+- verifier s'il existe une version plus recente du dashboard
+
+Dans `streamlit_app.py`, la lecture locale des chemins `outputs/...` n'est plus en dur. L'application lit maintenant une configuration externe, ce qui est indispensable dans un vrai deploiement poste utilisateur.
+
+### Packaging executable
+
+J'ai ajoute :
+
+- `packaging/dashboard_launcher.spec`
+- `scripts/build_dashboard_executable.ps1`
+- `scripts/build_dashboard_executable.sh`
+
+L'objectif est de construire une application portable nommee `SalesDashboard`.
+
+Important :
+
+- un executable Windows doit etre construit sur Windows
+- un executable Linux doit etre construit sur Linux
+
+Autrement dit, depuis ma machine Linux actuelle, je peux preparer le code, les scripts et la structure de packaging, mais pas produire un vrai `.exe` Windows natif de maniere fiable.
+
+### Comment tester sur un deuxieme PC Windows
+
+Voici le scenario concret.
+
+#### Etape 1. Mettre a jour les donnees publiees
+
+Depuis le depot principal :
+
+```bash
+python3 -m src.cli run --config config/prod.toml --runtime-root .
+python3 -m src.reporting.dashboard_publish --runtime-root .
+```
+
+Ensuite :
+
+```bash
+git add published_data
+git commit -m "Publish dashboard data"
+git push origin executable/streamlit
+```
+
+Ainsi, les URLs GitHub Raw pointe sur les CSV publies les plus recents.
+
+#### Etape 2. Construire le dashboard executable sur un PC Windows de build
+
+Sur un PC Windows avec Python installe pour la construction :
+
+```powershell
+py -m pip install --upgrade pip
+py -m pip install ".[dashboard-build]"
+powershell -ExecutionPolicy Bypass -File .\scripts\build_dashboard_executable.ps1
+```
+
+Le script genere :
+
+- `dist\SalesDashboard\`
+- `dist\SalesDashboard-win64-0.1.0.zip`
+
+Le dossier contient :
+
+- `SalesDashboard.exe`
+- `dashboard_config.toml`
+- `dashboard_version.json`
+- `update_dashboard_runtime.ps1`
+
+Le fichier `dashboard_config.toml` est copie depuis `config/dashboard_github.toml`. Donc, une fois distribue sur un poste utilisateur, le dashboard lira les donnees publiees dans GitHub.
+
+#### Etape 3. Tester sur le deuxieme PC Windows
+
+1. copier le dossier `dist\SalesDashboard\` ou le zip sur le deuxieme PC
+2. extraire le zip si necessaire
+3. double-cliquer sur `SalesDashboard.exe`
+
+L'utilisateur n'a pas besoin de Python.
+
+Quand l'application s'ouvre, elle lit :
+
+- `published_data/transformation/clean_sales_data.csv`
+- `published_data/analytics/analytics_quality.csv`
+- `published_data/analytics/analytics_file_inventory.csv`
+
+via GitHub Raw.
+
+Si tu as pousse une version plus recente des CSV, alors au prochain lancement l'utilisateur verra les donnees a jour.
+
+Le bouton `Rafraichir les donnees` permet en plus de vider le cache Streamlit et de relire la source distante.
+
+### Mise a jour du code du dashboard
+
+Il faut distinguer deux choses.
+
+#### Mise a jour des donnees
+
+Elle se fait en republient `published_data/` puis en poussant Git.
+
+L'executable n'a pas besoin d'etre reconstruit.
+
+#### Mise a jour du code et de l'UI
+
+Si l'interface change, il faut :
+
+1. modifier le code
+2. incrementer `src/reporting/dashboard_version.py`
+3. reconstruire le package executable
+4. publier le nouveau zip Windows
+5. mettre a jour le manifeste de release
+
+Pour cette derniere etape, j'ai ajoute :
+
+- `published_app/dashboard_release.json`
+- `scripts/update_dashboard_release_manifest.py`
+- `scripts/update_dashboard_runtime.ps1`
+
+Le manifeste represente la "version de reference" du dashboard distribue.
+
+Le script PowerShell `update_dashboard_runtime.ps1` permet a un poste Windows de :
+
+- lire le manifeste distant
+- comparer la version locale a la version publiee
+- telecharger un nouveau zip
+- remplacer les fichiers locaux
+
+Dans un vrai contexte entreprise, le zip Windows serait publie :
+
+- sur un partage reseau
+- dans un depot d'artefacts
+- dans GitHub Releases
+- ou via un outil IT de distribution logicielle
+
+Ici, le champ `windows_package_url` du manifeste est volontairement vide tant que le premier zip Windows n'a pas encore ete publie. Le mecanisme est donc en place, mais la premiere publication concrete du package doit etre faite apres le build sur Windows.
+
+### Pourquoi ce design est sain
+
+Cette architecture respecte une bonne separation des responsabilites :
+
+- le pipeline calcule
+- le dossier `published_data/` publie les resultats
+- le dashboard affiche
+- le manifeste de release pilote la mise a jour applicative
+
+Cela permet de bien distinguer :
+
+- la fraicheur des donnees
+- la version du logiciel
+
+Et c'est exactement la bonne logique a expliquer en entreprise.
+
+### Ce que cela t'apprend pour un vrai contexte entreprise
+
+Ce travail montre qu'un dashboard Streamlit poste utilisateur peut etre industrialise si on pose clairement :
+
+- une source de donnees centralisee
+- une configuration externe
+- un launcher executable
+- une version applicative
+- un mecanisme de mise a jour distinct des donnees
+
+Autrement dit :
+
+- les donnees changent souvent
+- le code change moins souvent
+- on ne doit pas confondre les deux cycles
+
+C'est ce decouplage qui rend le systeme plus simple pour :
+
+- les utilisateurs Metier
+- les Ops
+- et les developpeurs
