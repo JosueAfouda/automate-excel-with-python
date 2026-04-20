@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +13,9 @@ from xlsxwriter.workbook import Workbook
 from xlsxwriter.worksheet import Worksheet
 
 from ..analytic.kpis import KPIBundle, normalize_dimension_kpis, normalize_monthly_kpis
+
+LATEST_REPORT_FILENAME = "rapport_ventes_latest.xlsx"
+REPORT_STATE_FILENAME = ".rapport_ventes_state.json"
 
 SUMMARY_LABELS = {
     "period_start": "Debut de periode",
@@ -60,23 +65,29 @@ class ReportFormats:
     currency: Format
     integer: Format
     percent: Format
+    positive_text: Format
+    negative_text: Format
+    neutral_text: Format
 
 
-def build_report_output_path(
-    output_dir: Path,
-    generated_at: pd.Timestamp | None = None,
-) -> Path:
-    """Return a unique timestamped output path for the management report."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    report_timestamp = (generated_at or pd.Timestamp.now()).strftime("%Y%m%d_%H%M%S")
-    candidate_path = output_dir / f"rapport_ventes_{report_timestamp}.xlsx"
-    suffix = 1
+@dataclass(frozen=True)
+class ReportGenerationResult:
+    """Result of the management report generation stage."""
 
-    while candidate_path.exists():
-        candidate_path = output_dir / f"rapport_ventes_{report_timestamp}_{suffix:02d}.xlsx"
-        suffix += 1
+    path: Path
+    generated: bool
+    fingerprint: str
+    latest_month: str
 
-    return candidate_path
+
+def get_latest_report_path(output_dir: Path) -> Path:
+    """Return the canonical path used for the current stakeholder workbook."""
+    return output_dir / LATEST_REPORT_FILENAME
+
+
+def get_report_state_path(output_dir: Path) -> Path:
+    """Return the hidden state file used to detect unchanged report reruns."""
+    return output_dir / REPORT_STATE_FILENAME
 
 
 def _build_report_formats(workbook: Workbook) -> ReportFormats:
@@ -123,6 +134,15 @@ def _build_report_formats(workbook: Workbook) -> ReportFormats:
         percent=workbook.add_format(
             {"font_name": "Calibri", "font_size": 11, "num_format": "0.0%"}
         ),
+        positive_text=workbook.add_format(
+            {"font_name": "Calibri", "font_size": 11, "bold": True, "font_color": "#2E7D32"}
+        ),
+        negative_text=workbook.add_format(
+            {"font_name": "Calibri", "font_size": 11, "bold": True, "font_color": "#C62828"}
+        ),
+        neutral_text=workbook.add_format(
+            {"font_name": "Calibri", "font_size": 11, "bold": True, "font_color": "#616161"}
+        ),
     )
 
 
@@ -132,15 +152,7 @@ def _parse_overview_value(metric_name: str, raw_value: object) -> object:
         timestamp = pd.to_datetime(raw_value, errors="coerce")
         return timestamp.to_pydatetime() if pd.notna(timestamp) else str(raw_value)
 
-    if metric_name in {
-        "total_revenue",
-        "average_ticket",
-        "new_revenue",
-        "existing_revenue",
-        "new_revenue_share",
-        "total_transactions",
-        "stores_count",
-    }:
+    if metric_name in SUMMARY_ORDER:
         numeric_value = pd.to_numeric(raw_value, errors="coerce")
         return float(numeric_value) if pd.notna(numeric_value) else 0.0
 
@@ -272,9 +284,26 @@ def _write_summary_value(
     worksheet.write(row_index, 1, metric_value, cell_format)
 
 
+def _get_latest_month_label(monthly_df: pd.DataFrame) -> str:
+    """Return the latest covered business month."""
+    if monthly_df.empty or "year_month" not in monthly_df.columns:
+        return ""
+    return str(monthly_df.iloc[-1]["year_month"])
+
+
+def _get_comparison_month_labels(monthly_df: pd.DataFrame) -> tuple[str, str] | None:
+    """Return the latest and previous month labels when available."""
+    if len(monthly_df) < 2:
+        return None
+    previous_month = str(monthly_df.iloc[-2]["year_month"])
+    latest_month = str(monthly_df.iloc[-1]["year_month"])
+    return previous_month, latest_month
+
+
 def _write_summary_sheet(
     writer: pd.ExcelWriter,
     overview_df: pd.DataFrame,
+    monthly_df: pd.DataFrame,
     formats: ReportFormats,
     generated_at: pd.Timestamp,
 ) -> None:
@@ -285,19 +314,31 @@ def _write_summary_sheet(
     worksheet.set_column("A:A", 34)
     worksheet.set_column("B:B", 22)
 
+    latest_month = _get_latest_month_label(monthly_df) or "n/a"
+    comparison_labels = _get_comparison_month_labels(monthly_df)
+    comparison_label = (
+        f"{comparison_labels[1]} vs {comparison_labels[0]}"
+        if comparison_labels
+        else "Comparaison indisponible"
+    )
+
     worksheet.write("A1", "Rapport de ventes", formats.title)
     worksheet.write("A2", "Genere le", formats.metadata_label)
     worksheet.write_datetime("B2", generated_at.to_pydatetime(), formats.date)
-    worksheet.write("A4", "Indicateur", formats.header)
-    worksheet.write("B4", "Valeur", formats.header)
-    worksheet.freeze_panes(4, 0)
+    worksheet.write("A3", "Dernier mois couvert", formats.metadata_label)
+    worksheet.write("B3", latest_month, formats.metadata_value)
+    worksheet.write("A4", "Comparaison", formats.metadata_label)
+    worksheet.write("B4", comparison_label, formats.metadata_value)
+    worksheet.write("A6", "Indicateur", formats.header)
+    worksheet.write("B6", "Valeur", formats.header)
+    worksheet.freeze_panes(6, 0)
 
     overview_map = {
         str(row["metric"]): row["value"]
         for _, row in overview_df.iterrows()
     }
 
-    start_row = 4
+    start_row = 6
     for offset, metric_name in enumerate(SUMMARY_ORDER, start=1):
         row_index = start_row + offset
         worksheet.write(row_index, 0, SUMMARY_LABELS[metric_name], formats.text)
@@ -341,18 +382,267 @@ def _insert_monthly_trend_chart(
     worksheet.insert_chart("J2", chart, {"x_scale": 1.25, "y_scale": 1.15})
 
 
+def _get_trend_label(delta: float) -> str:
+    """Return a business-friendly label for a delta."""
+    if delta > 0:
+        return "Hausse"
+    if delta < 0:
+        return "Baisse"
+    return "Stable"
+
+
+def _get_trend_format(delta: float, formats: ReportFormats) -> Format:
+    """Return the text format used to highlight change direction."""
+    if delta > 0:
+        return formats.positive_text
+    if delta < 0:
+        return formats.negative_text
+    return formats.neutral_text
+
+
+def _safe_relative_variation(current_value: float, previous_value: float) -> float | None:
+    """Return the relative variation when it is mathematically valid."""
+    if previous_value == 0:
+        return None
+    return (current_value / previous_value) - 1
+
+
+def _write_number_or_blank(
+    worksheet: Worksheet,
+    row_index: int,
+    column_index: int,
+    value: float | int | None,
+    cell_format: Format,
+) -> None:
+    """Write a number when available, or leave the cell blank."""
+    if value is None or pd.isna(value):
+        worksheet.write_blank(row_index, column_index, None, cell_format)
+        return
+    worksheet.write_number(row_index, column_index, float(value), cell_format)
+
+
+def _write_monthly_comparison_sheet(
+    writer: pd.ExcelWriter,
+    monthly_df: pd.DataFrame,
+    formats: ReportFormats,
+) -> None:
+    """Create a sheet comparing the latest month to the previous one."""
+    worksheet = writer.book.add_worksheet("Comparaison_Mensuelle")
+    writer.sheets["Comparaison_Mensuelle"] = worksheet
+    worksheet.hide_gridlines(2)
+    worksheet.set_column("A:A", 32)
+    worksheet.set_column("B:E", 18)
+    worksheet.set_column("F:F", 14)
+
+    worksheet.write("A1", "Comparaison mensuelle", formats.title)
+
+    if len(monthly_df) < 2:
+        worksheet.write(
+            "A3",
+            "Au moins deux mois sont necessaires pour calculer une comparaison.",
+            formats.text,
+        )
+        return
+
+    previous_row = monthly_df.iloc[-2]
+    current_row = monthly_df.iloc[-1]
+    previous_month = str(previous_row["year_month"])
+    current_month = str(current_row["year_month"])
+
+    comparison_rows = [
+        {
+            "label": "Chiffre d'affaires total",
+            "kind": "currency",
+            "previous": float(previous_row["revenue_total"]),
+            "current": float(current_row["revenue_total"]),
+        },
+        {
+            "label": "CA contrats existants",
+            "kind": "currency",
+            "previous": float(previous_row["revenue_existing"]),
+            "current": float(current_row["revenue_existing"]),
+        },
+        {
+            "label": "CA nouveaux contrats",
+            "kind": "currency",
+            "previous": float(previous_row["revenue_new"]),
+            "current": float(current_row["revenue_new"]),
+        },
+        {
+            "label": "Transactions",
+            "kind": "integer",
+            "previous": float(previous_row["transactions"]),
+            "current": float(current_row["transactions"]),
+        },
+        {
+            "label": "Panier moyen",
+            "kind": "currency",
+            "previous": float(previous_row["average_ticket"]),
+            "current": float(current_row["average_ticket"]),
+        },
+        {
+            "label": "Part nouveaux contrats",
+            "kind": "percent",
+            "previous": (
+                float(previous_row["revenue_new"]) / float(previous_row["revenue_total"])
+                if float(previous_row["revenue_total"]) else 0.0
+            ),
+            "current": (
+                float(current_row["revenue_new"]) / float(current_row["revenue_total"])
+                if float(current_row["revenue_total"]) else 0.0
+            ),
+        },
+        {
+            "label": "Croissance mensuelle",
+            "kind": "percent",
+            "previous": float(previous_row["growth_mom"]),
+            "current": float(current_row["growth_mom"]),
+        },
+    ]
+
+    worksheet.write("A2", "Periode comparee", formats.metadata_label)
+    worksheet.write("B2", f"{current_month} vs {previous_month}", formats.metadata_value)
+
+    headers = [
+        "Indicateur",
+        previous_month,
+        current_month,
+        "Delta",
+        "Variation %",
+        "Tendance",
+    ]
+    header_row = 3
+    for column_index, header in enumerate(headers):
+        worksheet.write(header_row, column_index, header, formats.header)
+
+    worksheet.freeze_panes(header_row + 1, 0)
+
+    for offset, row in enumerate(comparison_rows, start=1):
+        row_index = header_row + offset
+        previous_value = row["previous"]
+        current_value = row["current"]
+        delta_value = current_value - previous_value
+        variation_pct = (
+            None
+            if row["kind"] == "percent"
+            else _safe_relative_variation(current_value, previous_value)
+        )
+
+        if row["kind"] == "currency":
+            number_format = formats.currency
+        elif row["kind"] == "integer":
+            number_format = formats.integer
+        else:
+            number_format = formats.percent
+
+        worksheet.write(row_index, 0, row["label"], formats.text)
+        _write_number_or_blank(worksheet, row_index, 1, previous_value, number_format)
+        _write_number_or_blank(worksheet, row_index, 2, current_value, number_format)
+        _write_number_or_blank(worksheet, row_index, 3, delta_value, number_format)
+        _write_number_or_blank(worksheet, row_index, 4, variation_pct, formats.percent)
+        worksheet.write(
+            row_index,
+            5,
+            _get_trend_label(delta_value),
+            _get_trend_format(delta_value, formats),
+        )
+
+
+def _json_safe_records(dataframe: pd.DataFrame) -> list[dict[str, object]]:
+    """Convert a dataframe into stable JSON-serializable records."""
+    if dataframe.empty:
+        return []
+
+    serializable = dataframe.copy()
+    for column_name in serializable.columns:
+        column = serializable[column_name]
+        if pd.api.types.is_datetime64_any_dtype(column):
+            serializable[column_name] = column.dt.strftime("%Y-%m-%d %H:%M:%S").fillna("")
+        else:
+            serializable[column_name] = column.where(column.notna(), "").astype(str)
+
+    return serializable.to_dict(orient="records")
+
+
+def build_report_fingerprint(kpis: KPIBundle) -> str:
+    """Build a stable fingerprint from the business-facing report inputs."""
+    payload = {
+        "overview": _json_safe_records(kpis.overview),
+        "monthly": _json_safe_records(kpis.monthly),
+        "by_store": _json_safe_records(kpis.by_store),
+        "by_plan": _json_safe_records(kpis.by_plan),
+    }
+    serialized_payload = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+    return hashlib.sha256(serialized_payload.encode("utf-8")).hexdigest()
+
+
+def _read_report_state(state_path: Path) -> dict[str, str]:
+    """Read the previous report state if available."""
+    if not state_path.exists():
+        return {}
+
+    try:
+        return json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_report_state(
+    state_path: Path,
+    fingerprint: str,
+    latest_month: str,
+    generated_at: pd.Timestamp,
+) -> None:
+    """Persist the metadata used to detect unchanged reruns."""
+    state_payload = {
+        "fingerprint": fingerprint,
+        "latest_month": latest_month,
+        "generated_at": generated_at.isoformat(),
+    }
+    state_path.write_text(
+        json.dumps(state_payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+
+
+def _cleanup_old_reports(output_dir: Path, latest_report_path: Path) -> None:
+    """Remove outdated report files so only the current workbook remains visible."""
+    for candidate_path in output_dir.glob("rapport_ventes*.xlsx"):
+        if candidate_path == latest_report_path:
+            continue
+        candidate_path.unlink(missing_ok=True)
+
+
 def create_management_report(
     output_dir: Path,
     kpis: KPIBundle,
     generated_at: pd.Timestamp | None = None,
-) -> Path:
-    """Generate the final stakeholder Excel report and return its path."""
+) -> ReportGenerationResult:
+    """Generate or reuse the current stakeholder Excel report."""
+    output_dir.mkdir(parents=True, exist_ok=True)
     report_generated_at = generated_at or pd.Timestamp.now()
-    report_output_path = build_report_output_path(output_dir, report_generated_at)
     normalized_kpis = _normalize_report_bundle(kpis)
+    report_path = get_latest_report_path(output_dir)
+    state_path = get_report_state_path(output_dir)
+    latest_month = _get_latest_month_label(normalized_kpis.monthly)
+    fingerprint = build_report_fingerprint(normalized_kpis)
+    previous_state = _read_report_state(state_path)
+
+    if previous_state.get("fingerprint") == fingerprint and report_path.exists():
+        _cleanup_old_reports(output_dir, report_path)
+        return ReportGenerationResult(
+            path=report_path,
+            generated=False,
+            fingerprint=fingerprint,
+            latest_month=latest_month,
+        )
+
+    temporary_report_path = output_dir / ".rapport_ventes_latest.tmp.xlsx"
+    if temporary_report_path.exists():
+        temporary_report_path.unlink()
 
     with pd.ExcelWriter(
-        report_output_path,
+        temporary_report_path,
         engine="xlsxwriter",
         date_format="yyyy-mm-dd",
         datetime_format="yyyy-mm-dd hh:mm:ss",
@@ -363,6 +653,7 @@ def create_management_report(
         _write_summary_sheet(
             writer=writer,
             overview_df=normalized_kpis.overview,
+            monthly_df=normalized_kpis.monthly,
             formats=formats,
             generated_at=report_generated_at,
         )
@@ -384,10 +675,24 @@ def create_management_report(
             dataframe=normalized_kpis.by_plan,
             formats=formats,
         )
+        _write_monthly_comparison_sheet(
+            writer=writer,
+            monthly_df=normalized_kpis.monthly,
+            formats=formats,
+        )
         _insert_monthly_trend_chart(
             workbook=workbook,
             worksheet=monthly_sheet,
             monthly_df=normalized_kpis.monthly,
         )
 
-    return report_output_path
+    temporary_report_path.replace(report_path)
+    _write_report_state(state_path, fingerprint, latest_month, report_generated_at)
+    _cleanup_old_reports(output_dir, report_path)
+
+    return ReportGenerationResult(
+        path=report_path,
+        generated=True,
+        fingerprint=fingerprint,
+        latest_month=latest_month,
+    )

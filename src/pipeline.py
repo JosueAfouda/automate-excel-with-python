@@ -539,17 +539,28 @@ def run_pipeline(
             rows_analyzed,
         )
 
-    management_report_path = create_management_report(
+    report_result = create_management_report(
         output_dir=reporting_output_dir,
         kpis=current_kpi_bundle,
     )
-    logger.info("Reporting stage completed: %s", management_report_path)
+    if report_result.generated:
+        logger.info(
+            "Reporting stage completed: %s generated for latest month %s",
+            report_result.path,
+            report_result.latest_month or "n/a",
+        )
+    else:
+        logger.info(
+            "Reporting stage skipped: existing report reused at %s for latest month %s",
+            report_result.path,
+            report_result.latest_month or "n/a",
+        )
 
     combined_output_paths = {
         **ingestion_output_paths_result,
         **transformation_output_paths_result,
         **analytics_output_paths_result,
-        "management_report": management_report_path,
+        "management_report": report_result.path,
     }
     logger.info("Pipeline run completed successfully")
     return PipelineRunResult(

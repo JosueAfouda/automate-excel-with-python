@@ -1757,7 +1757,7 @@ La suite logique pourrait etre :
 - ajouter des KPI supplementaires
   par exemple : taux de retention, repartition geographique, KPI par type de contrat, top evolutions mensuelles
 
-## 9. La nouvelle etape de reporting Excel
+## Reporting Excel avance
 
 Tu as maintenant une vraie etape de reporting metier avec `src/reporting/excel_report.py`.
 
@@ -1765,18 +1765,24 @@ Son role est de transformer les sorties analytics en un fichier Excel lisible pa
 
 Le pipeline genere desormais un fichier dans :
 
-- `outputs/reports/rapport_ventes_<timestamp>.xlsx`
+- `outputs/reports/rapport_ventes_latest.xlsx`
 
-Le timestamp rend chaque execution tracable et evite d'ecraser le rapport precedent. Si deux executions tombent dans la meme seconde, le code ajoute un suffixe numerique pour garantir un nom unique.
+Le choix du mot `latest` est volontaire :
+
+- pour un utilisateur metier, il doit y avoir un seul fichier de reference
+- cela evite l'accumulation de plusieurs exports ambigus
+- le pipeline peut remplacer proprement le rapport precedent quand les donnees changent
+- si les donnees n'ont pas change, le pipeline peut detecter cela et ne pas regenerer inutilement le fichier
 
 ### Ce que contient le rapport
 
-Le rapport contient 4 onglets :
+Le rapport contient 5 onglets :
 
 - `Synthese` : les indicateurs cles du periode, formates pour un lecteur metier
 - `Tendance_Mensuelle` : l'evolution du chiffre d'affaires mois par mois
 - `Performance_Magasins` : le classement des magasins par revenu, volume et panier moyen
 - `Performance_Offres` : la performance des offres commerciales
+- `Comparaison_Mensuelle` : la comparaison entre le dernier mois disponible et le mois precedent
 
 Fonctionnellement, cela permet a un responsable commercial de voir rapidement :
 
@@ -1784,6 +1790,7 @@ Fonctionnellement, cela permet a un responsable commercial de voir rapidement :
 - quelle est la tendance mensuelle
 - quels magasins performent le mieux
 - quelles offres portent le revenu
+- comment le dernier mois evolue par rapport au mois precedent
 
 ### Comment `xlsxwriter` est utilise
 
@@ -1829,10 +1836,12 @@ J'ai corrige plusieurs problemes concrets :
 
 J'ai structure le reporting avec plusieurs petites fonctions :
 
-- une fonction pour construire un chemin de sortie unique
+- une fonction pour calculer un fingerprint du contenu du rapport
+- une fonction pour ecrire ou non le fichier `latest` selon les changements detectes
 - une fonction pour normaliser les KPIs avant export
 - une fonction pour ecrire la feuille `Synthese`
 - une fonction generique pour ecrire une feuille tabulaire
+- une fonction pour ecrire la feuille `Comparaison_Mensuelle`
 - une fonction pour inserer le graphique
 
 Pourquoi faire cela ?
@@ -1853,7 +1862,12 @@ Le pipeline fait maintenant 4 choses dans l'ordre :
 
 L'etape reporting est lancee apres les KPIs.
 
-Si aucun nouveau fichier n'est a analyser, le pipeline recharge les sorties analytics deja presentes et regenere quand meme un rapport Excel a jour. C'est utile en production : un utilisateur peut relancer un export metier sans forcer tout le recalcul.
+Si aucun nouveau fichier n'est a analyser, le pipeline recharge les sorties analytics deja presentes et decide ensuite :
+
+- soit de ne rien regenerer si le contenu du rapport est identique
+- soit de reecrire `rapport_ventes_latest.xlsx` si les donnees ont change
+
+Cela est plus professionnel qu'une simple creation de fichiers timestampes en boucle.
 
 ### Les bonnes pratiques a retenir
 
@@ -1864,7 +1878,8 @@ Pour une couche de reporting propre dans un pipeline :
 - cree les dossiers de sortie avec `mkdir(parents=True, exist_ok=True)`
 - evite les indices de colonnes en dur pour les formats et graphiques
 - centralise les formats Excel dans des objets reutilisables
-- rends les noms de fichiers uniques pour garder un historique des exports
+- donne un fichier de reference unique aux utilisateurs metier
+- detecte les reruns sans changement pour eviter les doublons inutiles
 
 Autrement dit :
 
@@ -1872,3 +1887,131 @@ Autrement dit :
 - `src/reporting/` presente
 
 C'est exactement le type de separation que l'on retrouve dans des pipelines plus proches de la production.
+
+## Strategie de gestion des rapports
+
+Voici la logique de conception a retenir pour tes futurs projets.
+
+### Une distinction importante
+
+Il faut separer deux notions :
+
+- la date de generation du fichier
+- la periode metier couverte par le rapport
+
+En pratique, le plus important pour un decideur est la periode couverte, pas l'heure exacte d'execution du job.
+
+### Les strategies possibles de gestion des rapports
+
+Il existe plusieurs approches.
+
+#### Approche 1 : un fichier fixe toujours ecrase
+
+Exemple :
+
+- `outputs/reports/rapport_ventes_latest.xlsx`
+
+Avantages :
+
+- tres simple pour les utilisateurs
+- un seul fichier de reference
+- pas d'ambiguite
+
+Inconvenients :
+
+- pas d'historique directement visible
+
+#### Approche 2 : un fichier par periode metier
+
+Exemple :
+
+- `rapport_ventes_2019-11.xlsx`
+
+Avantages :
+
+- le nom du fichier correspond au mois couvert
+- pas de confusion entre octobre et novembre
+
+Inconvenients :
+
+- plusieurs fichiers restent visibles
+- il faut encore savoir lequel est le plus recent
+
+#### Approche 3 : un fichier `latest` plus une archive technique
+
+Exemple :
+
+- `rapport_ventes_latest.xlsx`
+- `archive/rapport_ventes_2019-11_20260420_090342.xlsx`
+
+Avantages :
+
+- bon compromis entre lisibilite metier et tracabilite technique
+
+Inconvenients :
+
+- un peu plus de logique a implementer
+
+### La recommandation pour ce projet
+
+Vu la maturite actuelle du projet, l'approche la plus simple et la plus robuste est :
+
+- garder un seul fichier visible : `rapport_ventes_latest.xlsx`
+- supprimer les anciens rapports timestampes
+- stocker un petit etat technique cache pour savoir si le contenu a change
+- ne regenerer le rapport que si les KPIs ont reellement evolue
+
+### Pourquoi detecter les changements avant de regenerer
+
+Si le pipeline est relance plusieurs fois dans le meme mois, il est inutile de reecrire exactement le meme fichier.
+
+Une bonne pratique consiste a calculer un fingerprint du contenu du rapport :
+
+- overview
+- KPIs mensuels
+- KPIs par magasin
+- KPIs par offre
+
+Si ce fingerprint n'a pas change :
+
+- on garde le fichier existant
+- on ne cree pas de doublon
+- on evite aussi de faire croire a l'utilisateur qu'un nouveau rapport metier existe alors que le contenu est identique
+
+### Comment comparer le dernier mois au mois precedent
+
+Pour un decideur, le plus utile n'est pas seulement de voir le dernier mois, mais de comprendre ce qui a evolue.
+
+La solution la plus claire est d'ajouter une feuille dediee :
+
+- `Comparaison_Mensuelle`
+
+Cette feuille peut montrer pour le dernier mois et le mois precedent :
+
+- le chiffre d'affaires total
+- le chiffre d'affaires contrats existants
+- le chiffre d'affaires nouveaux contrats
+- le nombre de transactions
+- le panier moyen
+- la croissance mensuelle
+
+Pour chaque indicateur, on peut afficher :
+
+- la valeur du mois precedent
+- la valeur du dernier mois
+- le delta
+- une tendance : `Hausse`, `Baisse` ou `Stable`
+
+### Le principe general a retenir
+
+Pour une sortie de reporting propre :
+
+- les CSV analytics servent de couche technique
+- le fichier Excel sert de couche de presentation
+- le rapport metier doit etre simple a trouver
+- la comparaison doit etre orientee decision, pas seulement descriptive
+
+Autrement dit, un bon reporting n'est pas seulement un export Excel :
+
+- c'est un produit de communication pour la decision
+- il doit etre stable, clair et sans ambiguite
