@@ -13,6 +13,7 @@ from .analytic.kpis import (
     merge_quality_reports,
 )
 from .logging_config import configure_logging
+from .reporting.excel_report import create_management_report
 from .transformation.cleaning import clean_sales_data
 
 from .ingestion.sales_ingestion import (
@@ -65,6 +66,11 @@ def get_analytics_output_paths(output_dir: Path) -> dict[str, Path]:
         "analytics_quality": output_dir / "analytics_quality.csv",
         "analytics_file_inventory": output_dir / "analytics_file_inventory.csv",
     }
+
+
+def get_reporting_output_dir(output_root_dir: Path) -> Path:
+    """Return the output directory for stakeholder Excel reports."""
+    return output_root_dir / "reports"
 
 
 def read_ingestion_metadata(metadata_path: Path) -> pd.DataFrame:
@@ -133,6 +139,21 @@ def read_csv_output(output_path: Path, output_label: str) -> pd.DataFrame:
 
     logger.info("Loading %s from %s", output_label, output_path)
     return pd.read_csv(output_path)
+
+
+def load_analytics_bundle(output_paths: dict[str, Path]) -> KPIBundle:
+    """Load the current analytics outputs from disk."""
+    return KPIBundle(
+        overview=read_csv_output(output_paths["kpi_overview"], "KPI overview"),
+        monthly=read_csv_output(output_paths["monthly_kpis"], "monthly KPIs"),
+        by_store=read_csv_output(output_paths["kpis_by_store"], "store KPIs"),
+        by_plan=read_csv_output(output_paths["kpis_by_plan"], "plan KPIs"),
+        quality=read_csv_output(output_paths["analytics_quality"], "analytics quality report"),
+        file_inventory=read_csv_output(
+            output_paths["analytics_file_inventory"],
+            "analytics file inventory",
+        ),
+    )
 
 
 def get_file_keys_from_clean_data(clean_data: pd.DataFrame) -> set[tuple[str, str]]:
@@ -346,8 +367,10 @@ def run_pipeline(
     """Run the current pipeline and return the generated file paths."""
     log_file = configure_logging()
     ingestion_output_dir = output_dir or get_project_root() / "outputs" / "ingestion"
-    transformation_output_dir = ingestion_output_dir.parent / "transformation"
-    analytics_output_dir = ingestion_output_dir.parent / "analytics"
+    output_root_dir = ingestion_output_dir.parent
+    transformation_output_dir = output_root_dir / "transformation"
+    analytics_output_dir = output_root_dir / "analytics"
+    reporting_output_dir = get_reporting_output_dir(output_root_dir)
     ingestion_output_paths = get_output_paths(ingestion_output_dir)
     transformation_output_paths = get_transformation_output_paths(transformation_output_dir)
     analytics_output_paths = get_analytics_output_paths(analytics_output_dir)
@@ -456,81 +479,77 @@ def run_pipeline(
 
     if not pending_analytics_keys:
         logger.info("No pending files to analyze. Analytics stage skipped.")
-        combined_output_paths = {
-            **ingestion_output_paths_result,
-            **transformation_output_paths_result,
-            **analytics_output_paths,
-        }
-        logger.info("Pipeline run completed successfully with no pending analytics")
-        return PipelineRunResult(
-            output_paths=combined_output_paths,
-            new_files_processed=len(new_files),
-            skipped_files=skipped_files,
-            rows_ingested=rows_ingested,
-            rows_cleaned=rows_cleaned,
-            rows_analyzed=0,
+        current_kpi_bundle = load_analytics_bundle(analytics_output_paths)
+        analytics_output_paths_result = analytics_output_paths
+        rows_analyzed = 0
+    else:
+        analytics_input_data = filter_rows_for_file_keys(
+            current_clean_data,
+            pending_analytics_keys,
+        )
+        logger.info(
+            "Starting analytics stage on %s cleaned row(s) from %s file(s)",
+            len(analytics_input_data),
+            len(pending_analytics_keys),
+        )
+        kpi_bundle = build_kpi_bundle(analytics_input_data)
+
+        existing_overview = read_csv_output(analytics_output_paths["kpi_overview"], "KPI overview")
+        existing_monthly = read_csv_output(analytics_output_paths["monthly_kpis"], "monthly KPIs")
+        existing_by_store = read_csv_output(analytics_output_paths["kpis_by_store"], "store KPIs")
+        existing_by_plan = read_csv_output(analytics_output_paths["kpis_by_plan"], "plan KPIs")
+        existing_quality = read_csv_output(
+            analytics_output_paths["analytics_quality"],
+            "analytics quality report",
         )
 
-    analytics_input_data = filter_rows_for_file_keys(
-        current_clean_data,
-        pending_analytics_keys,
-    )
-    logger.info(
-        "Starting analytics stage on %s cleaned row(s) from %s file(s)",
-        len(analytics_input_data),
-        len(pending_analytics_keys),
-    )
-    kpi_bundle = build_kpi_bundle(analytics_input_data)
+        merged_monthly = merge_monthly_kpis(existing_monthly, kpi_bundle.monthly)
+        merged_by_store = merge_dimension_kpis(existing_by_store, kpi_bundle.by_store, "store")
+        merged_by_plan = merge_dimension_kpis(existing_by_plan, kpi_bundle.by_plan, "plan")
+        merged_overview = merge_overview_kpis(
+            existing_overview,
+            merged_monthly,
+            merged_by_store,
+            analytics_input_data,
+        )
 
-    existing_overview = read_csv_output(analytics_output_paths["kpi_overview"], "KPI overview")
-    existing_monthly = read_csv_output(analytics_output_paths["monthly_kpis"], "monthly KPIs")
-    existing_by_store = read_csv_output(analytics_output_paths["kpis_by_store"], "store KPIs")
-    existing_by_plan = read_csv_output(analytics_output_paths["kpis_by_plan"], "plan KPIs")
-    existing_quality = read_csv_output(
-        analytics_output_paths["analytics_quality"],
-        "analytics quality report",
-    )
+        quality_batch = kpi_bundle.quality.copy()
+        quality_batch["run_timestamp"] = pd.Timestamp.utcnow().isoformat()
+        merged_quality = merge_quality_reports(existing_quality, quality_batch)
+        merged_analytics_inventory = merge_ingestion_metadata(
+            existing_analytics_inventory,
+            kpi_bundle.file_inventory,
+        )
 
-    merged_monthly = merge_monthly_kpis(existing_monthly, kpi_bundle.monthly)
-    merged_by_store = merge_dimension_kpis(existing_by_store, kpi_bundle.by_store, "store")
-    merged_by_plan = merge_dimension_kpis(existing_by_plan, kpi_bundle.by_plan, "plan")
-    merged_overview = merge_overview_kpis(
-        existing_overview,
-        merged_monthly,
-        merged_by_store,
-        analytics_input_data,
-    )
+        current_kpi_bundle = KPIBundle(
+            overview=merged_overview,
+            monthly=merged_monthly,
+            by_store=merged_by_store,
+            by_plan=merged_by_plan,
+            quality=merged_quality,
+            file_inventory=merged_analytics_inventory,
+        )
+        analytics_output_paths_result = save_analytics_outputs(
+            current_kpi_bundle,
+            analytics_output_dir,
+        )
+        rows_analyzed = len(analytics_input_data)
+        logger.info(
+            "Analytics stage completed: %s cleaned row(s) processed into KPI outputs",
+            rows_analyzed,
+        )
 
-    quality_batch = kpi_bundle.quality.copy()
-    quality_batch["run_timestamp"] = pd.Timestamp.utcnow().isoformat()
-    merged_quality = merge_quality_reports(existing_quality, quality_batch)
-    merged_analytics_inventory = merge_ingestion_metadata(
-        existing_analytics_inventory,
-        kpi_bundle.file_inventory,
+    management_report_path = create_management_report(
+        output_dir=reporting_output_dir,
+        kpis=current_kpi_bundle,
     )
-
-    merged_kpi_bundle = KPIBundle(
-        overview=merged_overview,
-        monthly=merged_monthly,
-        by_store=merged_by_store,
-        by_plan=merged_by_plan,
-        quality=merged_quality,
-        file_inventory=merged_analytics_inventory,
-    )
-    analytics_output_paths_result = save_analytics_outputs(
-        merged_kpi_bundle,
-        analytics_output_dir,
-    )
-    rows_analyzed = len(analytics_input_data)
-    logger.info(
-        "Analytics stage completed: %s cleaned row(s) processed into KPI outputs",
-        rows_analyzed,
-    )
+    logger.info("Reporting stage completed: %s", management_report_path)
 
     combined_output_paths = {
         **ingestion_output_paths_result,
         **transformation_output_paths_result,
         **analytics_output_paths_result,
+        "management_report": management_report_path,
     }
     logger.info("Pipeline run completed successfully")
     return PipelineRunResult(

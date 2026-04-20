@@ -1756,3 +1756,119 @@ La suite logique pourrait etre :
 - produire des dashboards ou exports Excel a partir des CSV analytics
 - ajouter des KPI supplementaires
   par exemple : taux de retention, repartition geographique, KPI par type de contrat, top evolutions mensuelles
+
+## 9. La nouvelle etape de reporting Excel
+
+Tu as maintenant une vraie etape de reporting metier avec `src/reporting/excel_report.py`.
+
+Son role est de transformer les sorties analytics en un fichier Excel lisible par un decideur, sans lui demander d'ouvrir plusieurs CSV techniques.
+
+Le pipeline genere desormais un fichier dans :
+
+- `outputs/reports/rapport_ventes_<timestamp>.xlsx`
+
+Le timestamp rend chaque execution tracable et evite d'ecraser le rapport precedent. Si deux executions tombent dans la meme seconde, le code ajoute un suffixe numerique pour garantir un nom unique.
+
+### Ce que contient le rapport
+
+Le rapport contient 4 onglets :
+
+- `Synthese` : les indicateurs cles du periode, formates pour un lecteur metier
+- `Tendance_Mensuelle` : l'evolution du chiffre d'affaires mois par mois
+- `Performance_Magasins` : le classement des magasins par revenu, volume et panier moyen
+- `Performance_Offres` : la performance des offres commerciales
+
+Fonctionnellement, cela permet a un responsable commercial de voir rapidement :
+
+- combien de chiffre d'affaires a ete genere
+- quelle est la tendance mensuelle
+- quels magasins performent le mieux
+- quelles offres portent le revenu
+
+### Comment `xlsxwriter` est utilise
+
+Le fichier est cree via `pandas.ExcelWriter(..., engine="xlsxwriter")`.
+
+Concretement :
+
+- `pandas` ecrit les DataFrames dans les feuilles Excel
+- `xlsxwriter` donne acces au classeur et aux feuilles pour appliquer du style
+- on cree des `Format` reutilisables : monnaie, pourcentage, entier, date, en-tete
+- on applique ces formats colonne par colonne selon le nom metier des colonnes
+
+Cela est important : Excel ne "comprend" pas une valeur comme monnaie ou pourcentage par magie.
+Il faut :
+
+- ecrire une vraie valeur numerique
+- puis lui associer un format Excel adapte
+
+### Comment le graphique est cree
+
+Le graphique de tendance est ajoute dans `Tendance_Mensuelle`.
+
+Le code :
+
+- recupere la colonne `year_month` pour l'axe horizontal
+- recupere la colonne `revenue_total` pour l'axe vertical
+- cree un graphique `line`
+- l'insere dans la feuille avec `insert_chart(...)`
+
+Le point important est que le graphique s'appuie sur les noms de colonnes reels, pas sur des positions codees en dur. C'est plus robuste quand la structure evolue.
+
+### Les erreurs corrigees dans la premiere version
+
+J'ai corrige plusieurs problemes concrets :
+
+- le format du tableau mensuel visait de mauvaises colonnes
+- le graphique utilisait `transactions` au lieu de `revenue_total`
+- le code melangeait rapport metier et feuilles techniques non demandees
+- le chemin de sortie et le nom du fichier n'etaient pas gerees proprement
+- la generation n'etait pas integree comme une etape officielle du pipeline
+
+### Les choix de conception
+
+J'ai structure le reporting avec plusieurs petites fonctions :
+
+- une fonction pour construire un chemin de sortie unique
+- une fonction pour normaliser les KPIs avant export
+- une fonction pour ecrire la feuille `Synthese`
+- une fonction generique pour ecrire une feuille tabulaire
+- une fonction pour inserer le graphique
+
+Pourquoi faire cela ?
+
+- le code est plus lisible
+- chaque responsabilite est isolee
+- tu peux ajouter plus tard un nouvel onglet sans casser le reste
+- le pipeline peut reutiliser cette etape comme un vrai module de reporting
+
+### Le lien avec `src/pipeline.py`
+
+Le pipeline fait maintenant 4 choses dans l'ordre :
+
+1. ingestion
+2. transformation
+3. analytics
+4. reporting
+
+L'etape reporting est lancee apres les KPIs.
+
+Si aucun nouveau fichier n'est a analyser, le pipeline recharge les sorties analytics deja presentes et regenere quand meme un rapport Excel a jour. C'est utile en production : un utilisateur peut relancer un export metier sans forcer tout le recalcul.
+
+### Les bonnes pratiques a retenir
+
+Pour une couche de reporting propre dans un pipeline :
+
+- separe le calcul des KPIs et leur presentation
+- utilise `Path` pour tous les chemins
+- cree les dossiers de sortie avec `mkdir(parents=True, exist_ok=True)`
+- evite les indices de colonnes en dur pour les formats et graphiques
+- centralise les formats Excel dans des objets reutilisables
+- rends les noms de fichiers uniques pour garder un historique des exports
+
+Autrement dit :
+
+- `src/analytic/` calcule
+- `src/reporting/` presente
+
+C'est exactement le type de separation que l'on retrouve dans des pipelines plus proches de la production.
